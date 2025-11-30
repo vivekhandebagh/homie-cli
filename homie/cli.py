@@ -450,10 +450,12 @@ def config(cpu: float, memory: str, timeout: int):
     console.print(f"  [dim]Worker Port:[/]    {cfg.worker_port}")
     console.print(f"  [dim]Group Secret:[/]   {cfg.group_secret[:8]}...")
     console.print()
-    console.print(f"  [dim]Container Image:[/]  {cfg.container_image}")
     console.print(f"  [dim]CPU Limit:[/]        {cfg.container_cpu_limit} cores")
     console.print(f"  [dim]Memory Limit:[/]     {cfg.container_memory_limit}")
     console.print(f"  [dim]Timeout:[/]          {cfg.container_timeout}s")
+    console.print()
+    console.print(f"  [dim]Default Env:[/]      {cfg.default_env} ({cfg.envs.get(cfg.default_env, 'not set')})")
+    console.print(f"  [dim]Environments:[/]     {len(cfg.envs)} configured")
     console.print()
     console.print(f"[dim]Config file: ~/.homie/config.yaml[/]")
 

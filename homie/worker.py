@@ -38,7 +38,6 @@ class Worker:
 
         self._executor = ContainerExecutor(
             ContainerConfig(
-                image=config.container_image,
                 cpu_limit=config.container_cpu_limit,
                 memory_limit=config.container_memory_limit,
                 timeout=config.container_timeout,
