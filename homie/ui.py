@@ -1,5 +1,6 @@
 """Beautiful terminal UI using rich."""
 
+import time
 from typing import Optional
 
 from rich.console import Console
@@ -16,6 +17,113 @@ from .worker import Worker
 
 
 console = Console()
+
+
+# ASCII art frames for startup animation
+HOMIE_LOGO = r"""
+    __  ______  __  _____________
+   / / / / __ \/  |/  /  _/ ____/
+  / /_/ / / / / /|_/ // // __/
+ / __  / /_/ / /  / // // /___
+/_/ /_/\____/_/  /_/___/_____/
+"""
+
+POWERUP_FRAMES = [
+    # Frame 1 - Empty
+    r"""
+        .  *  .     .   *   .
+    .      .    .        .
+      *  .    .   *   .    *
+    .    .  *     .    .
+        .      .    *    .
+    """,
+    # Frame 2 - Dots appearing
+    r"""
+        .  *  .  o  .   *   .
+    .   o  .    .    o   .
+      *  .  o .   *   . o  *
+    .  o .  *     . o  .
+        .   o  .    *  o .
+    """,
+    # Frame 3 - Lines connecting
+    r"""
+        o──*──o  o──*───o
+    o─────o────o────o───o
+      *──o──o────*───o──*
+    o──o──*─────o──o──o
+        o───o──o────*──o
+    """,
+    # Frame 4 - Network forming
+    r"""
+       ╭──o──╮  ╭──o──╮
+    ╭──o──╮──╰──o──╯──╭──o
+    │  ╰──o────╮──o───╯  │
+    ╰──o──╯────╰──o──╮───╯
+       ╰──o──────o──╯
+    """,
+    # Frame 5 - Network active
+    r"""
+       ╭──●──╮  ╭──●──╮
+    ╭──●──╮──╰══●══╯──╭──●
+    │  ╰══●════╮══●═══╯  │
+    ╰══●══╯════╰══●══╮═══╯
+       ╰══●══════●══╯
+    """,
+]
+
+CONNECT_MESSAGES = [
+    "Initializing...",
+    "Scanning network...",
+    "Establishing connections...",
+    "Joining mesh...",
+    "ONLINE",
+]
+
+
+def play_startup_animation(name: str) -> None:
+    """Play the startup animation sequence."""
+    # Clear and show logo
+    console.clear()
+
+    # Show logo with fade-in effect
+    logo_lines = HOMIE_LOGO.strip().split('\n')
+    for i in range(len(logo_lines) + 1):
+        console.clear()
+        partial_logo = '\n'.join(logo_lines[:i])
+        console.print(f"[bold cyan]{partial_logo}[/]")
+        time.sleep(0.08)
+
+    time.sleep(0.3)
+
+    # Show network animation frames
+    for i, (frame, message) in enumerate(zip(POWERUP_FRAMES, CONNECT_MESSAGES)):
+        console.clear()
+        console.print(f"[bold cyan]{HOMIE_LOGO}[/]")
+
+        # Color the frame based on progress
+        if i < 2:
+            frame_style = "dim"
+        elif i < 4:
+            frame_style = "yellow"
+        else:
+            frame_style = "green bold"
+
+        console.print(f"[{frame_style}]{frame}[/]")
+
+        # Progress bar
+        progress = "█" * (i + 1) * 4 + "░" * (20 - (i + 1) * 4)
+        console.print(f"\n    [{frame_style}][{progress}][/]")
+
+        # Message
+        if i == len(CONNECT_MESSAGES) - 1:
+            console.print(f"\n    [bold green]◉ {message}[/] as [bold]{name}[/]")
+        else:
+            console.print(f"\n    [dim]◌ {message}[/]")
+
+        time.sleep(0.4)
+
+    time.sleep(0.5)
+    console.clear()
 
 
 def create_peers_table(peers: list[Peer]) -> Table:

@@ -16,6 +16,7 @@ from .jobs import create_job
 from .ui import (
     LiveDashboard,
     console,
+    play_startup_animation,
     print_job_complete,
     print_job_error,
     print_job_output,
@@ -109,13 +110,18 @@ def env_remove(name: str):
 @cli.command()
 @click.option("--name", "-n", default=None, help="Your display name")
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground with live dashboard")
-def up(name: str, foreground: bool):
+@click.option("--no-animation", is_flag=True, help="Skip startup animation")
+def up(name: str, foreground: bool, no_animation: bool):
     """Start the Homie daemon (discovery + worker)."""
     config = get_or_create_config()
 
     if name:
         config.name = name
         save_config(config)
+
+    # Play startup animation
+    if not no_animation:
+        play_startup_animation(config.name)
 
     ip = get_local_ip()
 
