@@ -153,6 +153,50 @@ container_memory_limit: 4g
 container_timeout: 600
 ```
 
+### Setting Resource Limits
+
+Control how much of your machine friends can use:
+
+```bash
+# Set CPU cores (e.g., 2 cores, 4 cores, 0.5 for half a core)
+homie config --cpu 4
+
+# Set memory limit (e.g., 4g, 8g, 16g)
+homie config --memory 8g
+
+# Set job timeout in seconds (default: 600 = 10 min)
+homie config --timeout 1800
+
+# View current settings
+homie config
+```
+
+**Examples:**
+- Light usage: `homie config --cpu 1 --memory 2g`
+- Medium usage: `homie config --cpu 2 --memory 4g` (default)
+- Heavy usage: `homie config --cpu 4 --memory 8g`
+- All-in: `homie config --cpu 8 --memory 16g`
+
+After changing settings, restart `homie up` for them to take effect.
+
+### Network Troubleshooting
+
+If peers can't find each other automatically (some routers block UDP broadcast):
+
+```bash
+# Manually add a friend by IP address
+homie add 192.168.1.42
+
+# Your friend adds you too
+homie add 192.168.1.75
+
+# List manually added peers
+homie list-direct
+
+# Remove a peer
+homie remove 192.168.1.42
+```
+
 ## License
 
 MIT

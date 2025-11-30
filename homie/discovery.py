@@ -31,7 +31,7 @@ class Peer:
     @property
     def is_alive(self) -> bool:
         """Check if peer is still alive (seen within timeout)."""
-        return time.time() - self.last_seen < 10.0
+        return time.time() - self.last_seen < 30.0  # 30 sec timeout (more forgiving for flaky wifi)
 
     def to_dict(self) -> dict:
         return {

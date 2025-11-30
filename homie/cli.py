@@ -321,9 +321,33 @@ def kill(job_id: str):
 
 
 @cli.command()
-def config():
-    """Show current configuration."""
+@click.option("--cpu", type=float, help="Set CPU core limit (e.g., 2.0)")
+@click.option("--memory", type=str, help="Set memory limit (e.g., 4g, 8g)")
+@click.option("--timeout", type=int, help="Set job timeout in seconds")
+def config(cpu: float, memory: str, timeout: int):
+    """Show or update configuration."""
     cfg = get_or_create_config()
+
+    # Update config if options provided
+    changed = False
+    if cpu is not None:
+        cfg.container_cpu_limit = cpu
+        changed = True
+        console.print(f"[green]✓[/] CPU limit set to {cpu} cores")
+    if memory is not None:
+        cfg.container_memory_limit = memory
+        changed = True
+        console.print(f"[green]✓[/] Memory limit set to {memory}")
+    if timeout is not None:
+        cfg.container_timeout = timeout
+        changed = True
+        console.print(f"[green]✓[/] Timeout set to {timeout}s")
+
+    if changed:
+        save_config(cfg)
+        console.print()
+        console.print("[dim]Restart 'homie up' for changes to take effect[/]")
+        console.print()
 
     console.print("[bold]Current Configuration[/]")
     console.print()
