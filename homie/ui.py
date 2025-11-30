@@ -20,13 +20,45 @@ console = Console()
 
 
 # ASCII art frames for startup animation
-HOMIE_LOGO = r"""
-    __  ______  __  _____________
-   / / / / __ \/  |/  /  _/ ____/
+HOMIE_LOGO = """    __  ______  __  _____________
+   / / / / __ \\/  |/  /  _/ ____/
   / /_/ / / / / /|_/ // // __/
  / __  / /_/ / /  / // // /___
-/_/ /_/\____/_/  /_/___/_____/
-"""
+/_/ /_/\\____/_/  /_/___/_____/"""
+
+# Compact logo for headers (single line style)
+HOMIE_LOGO_SMALL = r"""  ___ ___  ___  _____ _____
+ | . |   ||   ||     |   __|
+ |   | | || | ||-   -|   __|
+ |_|_|___||___||_____|_____|"""
+
+# Network "hum" frames - subtle animation showing the network is alive
+NETWORK_HUM_FRAMES = [
+    r"""
+  ╭──●─╮  ╭──●────╮
+╭─●──╮─╰══●══╯─╭──●
+│ ╰══●═══╮══●══╯  │
+╰══●══╯══╰══●══╮══╯
+   ╰══●════●══─╯""",
+    r"""
+  ╭──○─╮  ╭──●────╮
+╭─●──╮─╰══●══╯─╭──○
+│ ╰══●═══╮══○══╯  │
+╰══○══╯══╰══●══╮══╯
+   ╰══●════○══─╯""",
+    r"""
+  ╭──●─╮  ╭──○────╮
+╭─○──╮─╰══●══╯─╭──●
+│ ╰══○═══╮══●══╯  │
+╰══●══╯══╰══○══╮══╯
+   ╰══○════●══─╯""",
+    r"""
+  ╭──○─╮  ╭──○────╮
+╭─●──╮─╰══○══╯─╭──●
+│ ╰══●═══╮══●══╯  │
+╰══●══╯══╰══●══╮══╯
+   ╰══●════●══─╯""",
+]
 
 POWERUP_FRAMES = [
     # Frame 1 - Empty
@@ -166,9 +198,12 @@ def create_peers_table(peers: list[Peer]) -> Table:
 
 def create_header(name: str, ip: str) -> Panel:
     """Create the header panel."""
+    header_text = Text()
+    header_text.append(HOMIE_LOGO.strip(), style="bold cyan")
+    header_text.append(f"\n{name}@{ip}", style="dim")
     return Panel(
-        Text(f"🏠 HOMIE COMPUTE\n{name}@{ip}", justify="center", style="bold blue"),
-        style="blue",
+        header_text,
+        style="cyan",
         padding=(0, 2),
     )
 
@@ -254,12 +289,18 @@ class LiveDashboard:
         name: str,
         discovery: Discovery,
         worker: Optional[Worker] = None,
+        docker_ok: bool = True,
+        gpu_ok: bool = False,
     ):
         self.name = name
         self.discovery = discovery
         self.worker = worker
+        self.docker_ok = docker_ok
+        self.gpu_ok = gpu_ok
         self.ip = get_local_ip()
+        self.stats = get_system_stats()
         self._events: list[str] = []
+        self._frame_count = 0
 
     def add_event(self, message: str) -> None:
         """Add an event to the log."""
@@ -274,18 +315,23 @@ class LiveDashboard:
         with Live(
             self._render(),
             console=console,
-            refresh_per_second=1,
+            refresh_per_second=2,
             screen=False,
         ) as live:
             try:
                 while True:
+                    self._frame_count += 1
                     live.update(self._render())
                     # Write peer cache for other commands to use
                     self.discovery.write_peer_cache()
-                    import time
                     time.sleep(0.5)
             except KeyboardInterrupt:
                 pass
+
+    def _get_network_hum(self) -> str:
+        """Get current network hum animation frame."""
+        frame_idx = self._frame_count % len(NETWORK_HUM_FRAMES)
+        return NETWORK_HUM_FRAMES[frame_idx]
 
     def _render(self) -> Layout:
         """Render the dashboard."""
@@ -294,15 +340,88 @@ class LiveDashboard:
 
         layout = Layout()
         layout.split_column(
-            Layout(name="header", size=4),
+            Layout(name="header", size=9),
+            Layout(name="info", size=6),
             Layout(name="peers"),
-            Layout(name="events", size=8),
+            Layout(name="footer", size=8),
         )
 
-        # Header
-        layout["header"].update(create_header(self.name, self.ip))
+        # === HEADER: Logo + Network Hum ===
+        header_layout = Layout()
+        header_layout.split_row(
+            Layout(name="logo", ratio=2),
+            Layout(name="network", ratio=1),
+        )
 
-        # Peers
+        # Logo
+        logo_text = Text()
+        logo_text.append(HOMIE_LOGO, style="bold cyan")
+        header_layout["logo"].update(Panel(logo_text, border_style="cyan"))
+
+        # Network hum
+        network_frame = self._get_network_hum()
+        if peers:
+            net_style = "green"
+        else:
+            net_style = "yellow"
+
+        network_text = Text()
+        network_text.append(network_frame.strip(), style=net_style)
+        network_text.append("\n")
+        if peers:
+            network_text.append("● MESH ACTIVE", style="bold green")
+            network_text.append(f" ({len(peers)} nodes)", style="dim")
+        else:
+            network_text.append("◌ SCANNING...", style="yellow")
+        header_layout["network"].update(Panel(network_text, border_style=net_style))
+
+        layout["header"].update(header_layout)
+
+        # === INFO: Your details ===
+        config = self.discovery.config
+        info_layout = Layout()
+        info_layout.split_row(
+            Layout(name="identity"),
+            Layout(name="resources"),
+            Layout(name="status"),
+        )
+
+        # Identity
+        identity_text = Text()
+        identity_text.append("Name: ", style="dim")
+        identity_text.append(f"{self.name}\n", style="bold green")
+        identity_text.append("IP: ", style="dim")
+        identity_text.append(f"{self.ip}\n")
+        identity_text.append("Port: ", style="dim")
+        identity_text.append(f"{config.worker_port}")
+        info_layout["identity"].update(Panel(identity_text, title="[dim]YOU[/]", border_style="dim"))
+
+        # Resources - show what you're sharing with the network
+        resources_text = Text()
+        resources_text.append("CPU: ", style="dim")
+        resources_text.append(f"{config.container_cpu_limit} cores\n", style="cyan")
+        resources_text.append("RAM: ", style="dim")
+        resources_text.append(f"{config.container_memory_limit}\n", style="cyan")
+        resources_text.append("Timeout: ", style="dim")
+        resources_text.append(f"{config.container_timeout}s", style="cyan")
+        info_layout["resources"].update(Panel(resources_text, title="[dim]SHARING[/]", border_style="dim"))
+
+        # Status indicators
+        status_text = Text()
+        if self.docker_ok:
+            status_text.append("● Docker\n", style="green")
+        else:
+            status_text.append("○ Docker\n", style="red")
+        status_text.append("● Discovery\n", style="green")
+        if self.gpu_ok:
+            status_text.append("● GPU\n", style="green")
+        else:
+            status_text.append("○ GPU\n", style="dim")
+        info_layout["status"].update(Panel(status_text, title="[dim]STATUS[/]", border_style="dim"))
+
+        layout["info"].update(info_layout)
+
+        # === PEERS: Homies online ===
         if peers:
             peers_panel = Panel(
                 create_peers_table(peers),
@@ -312,20 +431,42 @@ class LiveDashboard:
             )
         else:
             peers_panel = Panel(
-                Text("Searching for homies...", justify="center", style="dim"),
+                Text("Searching for homies...\n\n[dim]Make sure they're running 'homie up' with the same group secret[/]", justify="center"),
                 title="[bold]HOMIES ONLINE[/]",
                 border_style="dim",
             )
         layout["peers"].update(peers_panel)
+
+        # === FOOTER: Activity + Running Jobs ===
+        footer_layout = Layout()
+        footer_layout.split_row(
+            Layout(name="events", ratio=2),
+            Layout(name="jobs", ratio=1),
+        )
 
         # Events
         if self._events:
             events_text = Text("\n".join(self._events))
         else:
             events_text = Text("Waiting for activity...", style="dim")
-        layout["events"].update(
+        footer_layout["events"].update(
             Panel(events_text, title="[bold]ACTIVITY[/]", border_style="dim")
         )
+
+        # Running jobs
+        if running_jobs:
+            jobs_text = Text()
+            for rj in running_jobs[:3]:
+                elapsed = time.time() - rj.start_time
+                jobs_text.append(f"● {rj.job.filename}\n", style="yellow")
+                jobs_text.append(f"  {rj.job.sender} ({int(elapsed)}s)\n", style="dim")
+        else:
+            jobs_text = Text("No jobs running", style="dim")
+        footer_layout["jobs"].update(
+            Panel(jobs_text, title="[bold]RUNNING[/]", border_style="dim")
+        )
+
+        layout["footer"].update(footer_layout)
 
         return layout
 
@@ -341,16 +482,18 @@ def print_startup_banner(
     """Print the startup banner."""
     stats = get_system_stats()
 
+    # Logo
+    console.print(f"[bold cyan]{HOMIE_LOGO}[/]")
+
+    # Info panel
     content = Text()
-    content.append("🏠 HOMIE COMPUTE\n", style="bold blue")
-    content.append("─" * 35 + "\n", style="dim")
     content.append(f"Name: ", style="dim")
     content.append(f"{name}\n", style="green bold")
     content.append(f"IP: ", style="dim")
     content.append(f"{ip}\n")
     content.append(f"Port: ", style="dim")
     content.append(f"{port}\n")
-    content.append("─" * 35 + "\n", style="dim")
+    content.append("─" * 30 + "\n", style="dim")
     content.append(f"CPU: ", style="dim")
     content.append(f"{stats.cpu_count} cores\n")
     content.append(f"RAM: ", style="dim")
@@ -359,7 +502,7 @@ def print_startup_banner(
         content.append(f"GPU: ", style="dim")
         content.append(f"{stats.gpu_name}\n", style="yellow")
 
-    console.print(Panel(content, border_style="blue"))
+    console.print(Panel(content, border_style="cyan"))
     console.print()
 
     # Status indicators

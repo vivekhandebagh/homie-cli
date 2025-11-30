@@ -16,13 +16,11 @@ from .jobs import create_job
 from .ui import (
     LiveDashboard,
     console,
-    play_startup_animation,
     print_job_complete,
     print_job_error,
     print_job_output,
     print_job_start,
     print_peers_table,
-    print_startup_banner,
 )
 from .utils import get_local_ip
 from .worker import Worker
@@ -109,19 +107,13 @@ def env_remove(name: str):
 
 @cli.command()
 @click.option("--name", "-n", default=None, help="Your display name")
-@click.option("--foreground", "-f", is_flag=True, help="Run in foreground with live dashboard")
-@click.option("--no-animation", is_flag=True, help="Skip startup animation")
-def up(name: str, foreground: bool, no_animation: bool):
+def up(name: str):
     """Start the Homie daemon (discovery + worker)."""
     config = get_or_create_config()
 
     if name:
         config.name = name
         save_config(config)
-
-    # Play startup animation
-    if not no_animation:
-        play_startup_animation(config.name)
 
     ip = get_local_ip()
 
@@ -134,12 +126,10 @@ def up(name: str, foreground: bool, no_animation: bool):
 
     # Create discovery with callbacks
     def on_peer_joined(peer: Peer):
-        if foreground:
-            dashboard.add_event(f"[green]{peer.name}[/] joined ({peer.ip})")
+        dashboard.add_event(f"[green]{peer.name}[/] joined ({peer.ip})")
 
     def on_peer_left(peer: Peer):
-        if foreground:
-            dashboard.add_event(f"[red]{peer.name}[/] left")
+        dashboard.add_event(f"[red]{peer.name}[/] left")
 
     def on_status_changed(status: str):
         discovery.set_status(status)
@@ -152,40 +142,13 @@ def up(name: str, foreground: bool, no_animation: bool):
 
     worker.on_status_changed = on_status_changed
 
-    # Print banner
-    print_startup_banner(
-        name=config.name,
-        ip=ip,
-        port=config.worker_port,
-        discovery_port=config.discovery_port,
-        docker_ok=docker_ok,
-        gpu_ok=gpu_ok,
-    )
-
-    if not docker_ok:
-        console.print("[yellow]Warning:[/] Docker is not available. Jobs will fail to execute.")
-        console.print("[dim]Install Docker and try again: https://docs.docker.com/get-docker/[/]")
-        console.print()
-
     # Start services
     discovery.start()
     worker.start()
 
-    console.print("[dim]Waiting for homies... (Ctrl+C to stop)[/]")
-    console.print()
-
-    if foreground:
-        # Run live dashboard
-        dashboard = LiveDashboard(config.name, discovery, worker)
-        dashboard.run()
-    else:
-        # Simple event loop - also write peer cache periodically
-        try:
-            while True:
-                time.sleep(2)
-                discovery.write_peer_cache()
-        except KeyboardInterrupt:
-            pass
+    # Run live dashboard
+    dashboard = LiveDashboard(config.name, discovery, worker, docker_ok, gpu_ok)
+    dashboard.run()
 
     # Cleanup
     console.print("\n[dim]Shutting down...[/]")
