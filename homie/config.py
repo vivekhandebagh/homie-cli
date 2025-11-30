@@ -22,12 +22,15 @@ class HomieConfig:
     worker_port: int = 5556
     group_secret: str = field(default_factory=lambda: secrets.token_urlsafe(16))
 
-    # Container settings
-    container_image: str = "python:3.11-slim"
+    # Container settings (for plug)
     container_cpu_limit: float = 2.0
     container_memory_limit: str = "4g"
     container_timeout: int = 600
     container_network: str = "none"
+
+    # Environment settings (for mooch)
+    envs: dict = field(default_factory=lambda: {"py": "python:3.11-slim"})
+    default_env: str = "py"
 
     # Broadcast settings
     heartbeat_interval: float = 2.0
@@ -45,6 +48,9 @@ def load_config() -> HomieConfig:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             data = yaml.safe_load(f) or {}
+        # Handle migration from old config format
+        # Remove deprecated fields
+        data.pop("container_image", None)
         return HomieConfig(**data)
     return HomieConfig()
 
@@ -57,11 +63,12 @@ def save_config(config: HomieConfig) -> None:
         "discovery_port": config.discovery_port,
         "worker_port": config.worker_port,
         "group_secret": config.group_secret,
-        "container_image": config.container_image,
         "container_cpu_limit": config.container_cpu_limit,
         "container_memory_limit": config.container_memory_limit,
         "container_timeout": config.container_timeout,
         "container_network": config.container_network,
+        "envs": config.envs,
+        "default_env": config.default_env,
         "heartbeat_interval": config.heartbeat_interval,
         "peer_timeout": config.peer_timeout,
     }

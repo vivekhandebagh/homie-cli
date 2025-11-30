@@ -20,6 +20,7 @@ class Job:
     sender: str
     filename: str
     code: bytes
+    image: str = "python:3.11-slim"  # Docker image to run the job in
     args: list[str] = field(default_factory=list)
     files: dict[str, bytes] = field(default_factory=dict)
     require_gpu: bool = False
@@ -50,6 +51,7 @@ def create_job(
     args: list[str] = None,
     extra_files: list[str] = None,
     require_gpu: bool = False,
+    image: str = "python:3.11-slim",
 ) -> Job:
     """Create a job from a script file."""
     path = Path(script_path)
@@ -71,6 +73,7 @@ def create_job(
         sender=sender,
         filename=path.name,
         code=code,
+        image=image,
         args=args or [],
         files=files,
         require_gpu=require_gpu,
@@ -101,6 +104,7 @@ def serialize_job(job: Job, group_secret: str) -> str:
             "sender": job.sender,
             "filename": job.filename,
             "code": base64.b64encode(job.code).decode(),
+            "image": job.image,
             "args": job.args,
             "files": {k: base64.b64encode(v).decode() for k, v in job.files.items()},
             "require_gpu": job.require_gpu,
@@ -138,6 +142,7 @@ def deserialize_job(data: str, group_secret: str) -> Job:
         sender=job_data["sender"],
         filename=job_data["filename"],
         code=base64.b64decode(job_data["code"]),
+        image=job_data.get("image", "python:3.11-slim"),
         args=job_data["args"],
         files={k: base64.b64decode(v) for k, v in job_data["files"].items()},
         require_gpu=job_data.get("require_gpu", False),

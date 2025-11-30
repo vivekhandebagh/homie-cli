@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import docker
@@ -17,8 +18,6 @@ from .jobs import Job, JobResult
 class ContainerConfig:
     """Configuration for container execution."""
 
-    image: str = "python:3.11-slim"
-    gpu_image: str = "nvidia/cuda:12.1-runtime-ubuntu22.04"
     cpu_limit: float = 2.0
     memory_limit: str = "4g"
     timeout: int = 600
@@ -61,6 +60,31 @@ class ContainerExecutor:
         except Exception:
             return False
 
+    def _get_command(self, job: Job) -> list:
+        """Detect how to run the script based on extension."""
+        ext = Path(job.filename).suffix.lower()
+
+        commands = {
+            ".py": ["python", job.filename],
+            ".js": ["node", job.filename],
+            ".sh": ["bash", job.filename],
+            ".rb": ["ruby", job.filename],
+            ".pl": ["perl", job.filename],
+            ".php": ["php", job.filename],
+        }
+
+        base_cmd = commands.get(ext, ["python", job.filename])
+        return base_cmd + job.args
+
+    def _ensure_image(self, image: str) -> None:
+        """Pull image if not available locally."""
+        try:
+            self.client.images.get(image)
+        except docker.errors.ImageNotFound:
+            # Image not found locally, pull it
+            print(f"Pulling image {image}...")
+            self.client.images.pull(image)
+
     def execute(self, job: Job) -> JobResult:
         """Execute a job inside a container."""
         workspace = tempfile.mkdtemp(prefix=f"homie_{job.job_id}_")
@@ -71,13 +95,16 @@ class ContainerExecutor:
             # Write job files to workspace
             self._prepare_workspace(workspace, job)
 
-            # Select image based on GPU requirement
-            image = self.config.gpu_image if job.require_gpu else self.config.image
+            # Use image from job (sent by mooch)
+            image = job.image
+
+            # Ensure image is available (pull if needed)
+            self._ensure_image(image)
 
             # Build container run arguments
             run_kwargs = {
                 "image": image,
-                "command": ["python", job.filename] + job.args,
+                "command": self._get_command(job),
                 "detach": True,
                 "working_dir": "/workspace",
                 "volumes": {workspace: {"bind": "/workspace", "mode": "rw"}},

@@ -34,6 +34,78 @@ def cli():
     pass
 
 
+# ============================================================================
+# Environment Management Commands
+# ============================================================================
+
+@cli.group()
+def env():
+    """Manage execution environments (Docker images)."""
+    pass
+
+
+@env.command("create")
+@click.argument("name")
+@click.argument("image")
+def env_create(name: str, image: str):
+    """Create a named environment.
+
+    Example: homie env create ml pytorch/pytorch:latest
+    """
+    config = get_or_create_config()
+    config.envs[name] = image
+    save_config(config)
+    console.print(f"[green]✓[/] Created env '[cyan]{name}[/]' → {image}")
+
+
+@env.command("list")
+def env_list():
+    """List all environments."""
+    config = get_or_create_config()
+    if not config.envs:
+        console.print("[dim]No environments configured[/]")
+        console.print("Create one with: [bold]homie env create <name> <image>[/]")
+        return
+
+    console.print("[bold]Environments:[/]")
+    for name, image in config.envs.items():
+        default_marker = " [dim](default)[/]" if name == config.default_env else ""
+        console.print(f"  [cyan]{name}[/]: {image}{default_marker}")
+
+
+@env.command("default")
+@click.argument("name")
+def env_default(name: str):
+    """Set the default environment."""
+    config = get_or_create_config()
+    if name not in config.envs:
+        console.print(f"[red]Env '{name}' not found[/]")
+        console.print("Available envs:", ", ".join(config.envs.keys()) or "(none)")
+        sys.exit(1)
+    config.default_env = name
+    save_config(config)
+    console.print(f"[green]✓[/] Default env set to '[cyan]{name}[/]'")
+
+
+@env.command("remove")
+@click.argument("name")
+def env_remove(name: str):
+    """Remove an environment."""
+    config = get_or_create_config()
+    if name not in config.envs:
+        console.print(f"[yellow]Env '{name}' not found[/]")
+        return
+    if name == config.default_env:
+        console.print(f"[yellow]Warning:[/] Removing default env. Set a new default with 'homie env default <name>'")
+    del config.envs[name]
+    save_config(config)
+    console.print(f"[green]✓[/] Removed env '[cyan]{name}[/]'")
+
+
+# ============================================================================
+# Main Commands
+# ============================================================================
+
 @cli.command()
 @click.option("--name", "-n", default=None, help="Your display name")
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground with live dashboard")
@@ -204,14 +276,35 @@ def _get_peers_from_cache(config) -> list:
 
 @cli.command()
 @click.argument("script", type=click.Path(exists=True))
-@click.option("--peer", "-n", default=None, help="Run on specific peer (by name)")
+@click.option("--peer", "-p", default=None, help="Run on specific peer (by name)")
+@click.option("--env", "-e", "env_name", default=None, help="Use named environment")
+@click.option("--image", "-i", default=None, help="Use specific Docker image (overrides --env)")
 @click.option("--file", "-f", "files", multiple=True, help="Include additional files")
 @click.option("--gpu", is_flag=True, help="Request GPU for this job")
 @click.option("--wait", "-w", default=3, help="Seconds to wait for peer discovery")
 @click.argument("args", nargs=-1)
-def run(script: str, peer: str, files: tuple, gpu: bool, wait: int, args: tuple):
-    """Run a script on a peer's machine."""
+def run(script: str, peer: str, env_name: str, image: str, files: tuple, gpu: bool, wait: int, args: tuple):
+    """Run a script on a peer's machine.
+
+    Examples:
+        homie run train.py                    # Uses default env
+        homie run train.py --env ml           # Uses 'ml' env
+        homie run train.py --image python:3.9 # Uses specific image
+    """
     config = get_or_create_config()
+
+    # Resolve image: --image > --env > default_env
+    if image:
+        resolved_image = image
+    elif env_name:
+        if env_name not in config.envs:
+            console.print(f"[red]Env '{env_name}' not found[/]")
+            console.print("Available envs:", ", ".join(config.envs.keys()) or "(none)")
+            console.print("Create one with: [bold]homie env create <name> <image>[/]")
+            sys.exit(1)
+        resolved_image = config.envs[env_name]
+    else:
+        resolved_image = config.envs.get(config.default_env, "python:3.11-slim")
 
     # First try to get peers from cache (if homie up is running)
     cached_peers = _get_peers_from_cache(config)
@@ -266,6 +359,7 @@ def run(script: str, peer: str, files: tuple, gpu: bool, wait: int, args: tuple)
             args=list(args),
             extra_files=list(files),
             require_gpu=gpu,
+            image=resolved_image,
         )
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/]")
