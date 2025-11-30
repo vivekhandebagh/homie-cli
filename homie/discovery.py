@@ -60,7 +60,7 @@ def verify_heartbeat(data: dict, signature: str, secret: str) -> bool:
 
 
 class Discovery:
-    """UDP broadcast discovery service."""
+    """UDP broadcast discovery service with direct peer support."""
 
     def __init__(
         self,
@@ -73,6 +73,7 @@ class Discovery:
         self.on_peer_left = on_peer_left
 
         self._peers: dict[str, Peer] = {}
+        self._direct_peers: list[str] = []  # List of IPs to send direct heartbeats to
         self._lock = threading.Lock()
         self._running = False
         self._status = "idle"
@@ -83,6 +84,9 @@ class Discovery:
 
         self._broadcast_socket: Optional[socket.socket] = None
         self._listen_socket: Optional[socket.socket] = None
+
+        # Load direct peers from config file
+        self._load_direct_peers()
 
     def start(self) -> None:
         """Start the discovery service."""
@@ -174,6 +178,34 @@ class Discovery:
             "timestamp": time.time(),
         }
 
+    def _load_direct_peers(self) -> None:
+        """Load direct peer IPs from ~/.homie/peers file."""
+        from pathlib import Path
+        peers_file = Path.home() / ".homie" / "peers"
+        if peers_file.exists():
+            content = peers_file.read_text().strip()
+            self._direct_peers = [ip.strip() for ip in content.split("\n") if ip.strip()]
+
+    def add_direct_peer(self, ip: str) -> None:
+        """Add a direct peer IP and save to file."""
+        from pathlib import Path
+        if ip not in self._direct_peers:
+            self._direct_peers.append(ip)
+            peers_file = Path.home() / ".homie" / "peers"
+            peers_file.parent.mkdir(parents=True, exist_ok=True)
+            peers_file.write_text("\n".join(self._direct_peers) + "\n")
+
+    def remove_direct_peer(self, ip: str) -> None:
+        """Remove a direct peer IP."""
+        from pathlib import Path
+        if ip in self._direct_peers:
+            self._direct_peers.remove(ip)
+            peers_file = Path.home() / ".homie" / "peers"
+            if self._direct_peers:
+                peers_file.write_text("\n".join(self._direct_peers) + "\n")
+            elif peers_file.exists():
+                peers_file.unlink()
+
     def _broadcast_loop(self) -> None:
         """Broadcast heartbeat periodically."""
         while self._running:
@@ -182,10 +214,22 @@ class Discovery:
                 signature = sign_heartbeat(heartbeat, self.config.group_secret)
 
                 message = json.dumps({"heartbeat": heartbeat, "sig": signature}).encode()
+
+                # Send broadcast (for networks that support it)
                 self._broadcast_socket.sendto(
                     message,
                     ("<broadcast>", self.config.discovery_port),
                 )
+
+                # Also send directly to known peers (for networks that block broadcast)
+                for peer_ip in self._direct_peers:
+                    try:
+                        self._broadcast_socket.sendto(
+                            message,
+                            (peer_ip, self.config.discovery_port),
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

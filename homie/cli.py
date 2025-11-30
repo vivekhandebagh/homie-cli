@@ -314,5 +314,85 @@ def whoami():
     console.print(f"[bold]Ports:[/]  {config.discovery_port} (discovery), {config.worker_port} (worker)")
 
 
+@cli.command()
+@click.argument("ip")
+def add(ip: str):
+    """Add a peer by IP address (for networks that block broadcast)."""
+    from pathlib import Path
+
+    # Validate IP format (basic check)
+    parts = ip.split(".")
+    if len(parts) != 4:
+        console.print(f"[red]Invalid IP address: {ip}[/]")
+        sys.exit(1)
+
+    peers_file = Path.home() / ".homie" / "peers"
+    peers_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing peers
+    existing = []
+    if peers_file.exists():
+        existing = [p.strip() for p in peers_file.read_text().split("\n") if p.strip()]
+
+    if ip in existing:
+        console.print(f"[yellow]Peer {ip} already added[/]")
+    else:
+        existing.append(ip)
+        peers_file.write_text("\n".join(existing) + "\n")
+        console.print(f"[green]✓[/] Added peer: {ip}")
+        console.print()
+        console.print("[dim]This peer will now receive direct heartbeats.[/]")
+        console.print("[dim]Make sure they also run: homie add YOUR_IP[/]")
+
+
+@cli.command()
+@click.argument("ip")
+def remove(ip: str):
+    """Remove a direct peer by IP address."""
+    from pathlib import Path
+
+    peers_file = Path.home() / ".homie" / "peers"
+
+    if not peers_file.exists():
+        console.print(f"[yellow]No direct peers configured[/]")
+        return
+
+    existing = [p.strip() for p in peers_file.read_text().split("\n") if p.strip()]
+
+    if ip in existing:
+        existing.remove(ip)
+        if existing:
+            peers_file.write_text("\n".join(existing) + "\n")
+        else:
+            peers_file.unlink()
+        console.print(f"[green]✓[/] Removed peer: {ip}")
+    else:
+        console.print(f"[yellow]Peer {ip} not in list[/]")
+
+
+@cli.command("list-direct")
+def list_direct():
+    """List manually added peer IPs."""
+    from pathlib import Path
+
+    peers_file = Path.home() / ".homie" / "peers"
+
+    if not peers_file.exists():
+        console.print("[dim]No direct peers configured[/]")
+        console.print()
+        console.print("Add a peer with: [bold]homie add <IP>[/]")
+        return
+
+    existing = [p.strip() for p in peers_file.read_text().split("\n") if p.strip()]
+
+    if not existing:
+        console.print("[dim]No direct peers configured[/]")
+        return
+
+    console.print("[bold]Direct peers (bypass broadcast):[/]")
+    for ip in existing:
+        console.print(f"  {ip}")
+
+
 if __name__ == "__main__":
     cli()
