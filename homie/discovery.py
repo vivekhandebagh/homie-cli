@@ -88,24 +88,38 @@ class Discovery:
         # Load direct peers from config file
         self._load_direct_peers()
 
-    def start(self) -> None:
-        """Start the discovery service."""
+    def start(self, listen: bool = True) -> None:
+        """Start the discovery service.
+
+        Args:
+            listen: If True, bind to port and listen for peers (for homie up).
+                   If False, only send broadcasts and receive responses (for homie peers/run).
+        """
         if self._running:
             return
 
         self._running = True
+        self._listen_mode = listen
 
         # Create broadcast socket
         self._broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Create listen socket
-        self._listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self._listen_socket.bind(("", self.config.discovery_port))
-        self._listen_socket.settimeout(1.0)
+        if listen:
+            # Full listen mode - bind to port (for homie up)
+            self._listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._listen_socket.bind(("", self.config.discovery_port))
+            self._listen_socket.settimeout(1.0)
+        else:
+            # Client mode - use a random port to receive responses
+            self._listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._listen_socket.bind(("", 0))  # Random available port
+            self._listen_socket.settimeout(1.0)
 
         # Start threads
         self._broadcast_thread = threading.Thread(target=self._broadcast_loop, daemon=True)

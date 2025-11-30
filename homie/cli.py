@@ -130,7 +130,7 @@ def peers(wait: int):
     console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
 
     discovery = Discovery(config)
-    discovery.start()
+    discovery.start(listen=False)  # Client mode - don't bind to main port
 
     time.sleep(wait)
 
@@ -156,7 +156,7 @@ def run(script: str, peer: str, files: tuple, gpu: bool, wait: int, args: tuple)
     console.print(f"[dim]Discovering peers...[/]")
 
     discovery = Discovery(config)
-    discovery.start()
+    discovery.start(listen=False)  # Client mode - don't bind to main port
     time.sleep(wait)
 
     # Select peer
