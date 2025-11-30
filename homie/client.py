@@ -7,6 +7,7 @@ from typing import Optional
 
 from .config import HomieConfig
 from .discovery import Peer
+from .history import append_job_start, update_job_completion
 from .jobs import Job, JobResult, compute_auth_hmac, deserialize_result, serialize_job
 
 
@@ -28,6 +29,18 @@ class Client:
         Returns:
             JobResult with execution output
         """
+        # Log job start to history (mooch perspective)
+        append_job_start(
+            job_id=job.job_id,
+            sender=job.sender,
+            peer=peer.name,  # From mooch's perspective, peer is who's running it
+            filename=job.filename,
+            args=job.args,
+            image=job.image,
+            require_gpu=job.require_gpu,
+            role="mooch",
+        )
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
 
@@ -46,52 +59,103 @@ class Client:
             # Receive result (length-prefixed)
             length_bytes = self._recv_exactly(sock, 4)
             if not length_bytes:
-                return JobResult(
+                result = JobResult(
                     job_id=job.job_id,
                     exit_code=-1,
                     stdout="",
                     stderr="",
                     error="Connection closed by peer",
                 )
+                # Log completion
+                update_job_completion(
+                    job_id=job.job_id,
+                    exit_code=-1,
+                    runtime_seconds=0,
+                    error=result.error,
+                )
+                return result
 
             length = int.from_bytes(length_bytes, "big")
             result_data = self._recv_exactly(sock, length)
 
             if not result_data:
-                return JobResult(
+                result = JobResult(
                     job_id=job.job_id,
                     exit_code=-1,
                     stdout="",
                     stderr="",
                     error="Failed to receive result from peer",
                 )
+                # Log completion
+                update_job_completion(
+                    job_id=job.job_id,
+                    exit_code=-1,
+                    runtime_seconds=0,
+                    error=result.error,
+                )
+                return result
 
-            return deserialize_result(result_data.decode())
+            result = deserialize_result(result_data.decode())
+
+            # Log completion to history
+            update_job_completion(
+                job_id=job.job_id,
+                exit_code=result.exit_code,
+                runtime_seconds=result.runtime_seconds,
+                error=result.error,
+                output_file_count=len(result.output_files),
+            )
+
+            return result
 
         except socket.timeout:
-            return JobResult(
+            result = JobResult(
                 job_id=job.job_id,
                 exit_code=-1,
                 stdout="",
                 stderr="",
                 error="Connection timed out",
             )
+            # Log completion
+            update_job_completion(
+                job_id=job.job_id,
+                exit_code=-1,
+                runtime_seconds=timeout,
+                error=result.error,
+            )
+            return result
         except ConnectionRefusedError:
-            return JobResult(
+            result = JobResult(
                 job_id=job.job_id,
                 exit_code=-1,
                 stdout="",
                 stderr="",
                 error=f"Connection refused by {peer.name} ({peer.ip}:{peer.port})",
             )
+            # Log completion
+            update_job_completion(
+                job_id=job.job_id,
+                exit_code=-1,
+                runtime_seconds=0,
+                error=result.error,
+            )
+            return result
         except Exception as e:
-            return JobResult(
+            result = JobResult(
                 job_id=job.job_id,
                 exit_code=-1,
                 stdout="",
                 stderr="",
                 error=str(e),
             )
+            # Log completion
+            update_job_completion(
+                job_id=job.job_id,
+                exit_code=-1,
+                runtime_seconds=0,
+                error=result.error,
+            )
+            return result
         finally:
             sock.close()
 

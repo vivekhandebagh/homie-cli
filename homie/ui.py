@@ -575,3 +575,129 @@ def print_job_error(error: str) -> None:
     """Print job error message."""
     console.print()
     console.print(Panel(Text(error, style="red"), title="[bold red]✗ Job Failed[/]", border_style="red"))
+
+
+def create_history_table(entries: list, show_role: bool = True) -> Table:
+    """Create a table showing job history.
+
+    Args:
+        entries: List of JobHistoryEntry objects
+        show_role: Whether to show the role column (mooch/plug)
+    """
+    from datetime import datetime
+    from .history import JobHistoryEntry
+
+    table = Table(show_header=True, header_style="bold cyan", box=None)
+    table.add_column("TIME", style="dim", no_wrap=True)
+    table.add_column("JOB ID", style="cyan", no_wrap=True)
+    if show_role:
+        table.add_column("ROLE", justify="center")
+    table.add_column("PEER", style="green")
+    table.add_column("SCRIPT", style="yellow")
+    table.add_column("DURATION", justify="right")
+    table.add_column("STATUS", justify="center")
+
+    for entry in entries:
+        # Format timestamp
+        dt = datetime.fromtimestamp(entry.start_time)
+        time_str = dt.strftime("%m/%d %H:%M")
+
+        # Format duration
+        if entry.runtime_seconds is not None:
+            if entry.runtime_seconds < 60:
+                duration = f"{entry.runtime_seconds:.1f}s"
+            else:
+                mins = int(entry.runtime_seconds // 60)
+                secs = int(entry.runtime_seconds % 60)
+                duration = f"{mins}m{secs:02d}s"
+        else:
+            duration = Text("running", style="yellow")
+
+        # Format status
+        if entry.success is None:
+            status = Text("● running", style="yellow")
+        elif entry.success:
+            status = Text("✓ success", style="green")
+        else:
+            status = Text("✗ failed", style="red")
+
+        # Role indicator
+        if entry.role == "mooch":
+            role = Text("→", style="cyan")  # Sent job
+        else:
+            role = Text("←", style="green")  # Ran job
+
+        # Script name with args indicator
+        script = entry.filename
+        if entry.args:
+            script += f" [dim]+{len(entry.args)} args[/]"
+        if entry.require_gpu:
+            script += " [yellow]⚡[/]"
+
+        row = [time_str, entry.job_id, script, duration, status]
+        if show_role:
+            row.insert(2, role)
+
+        table.add_row(*row)
+
+    return table
+
+
+def print_history_summary(stats: dict) -> None:
+    """Print history summary statistics."""
+    from rich.columns import Columns
+    from rich.panel import Panel
+
+    panels = []
+
+    # Total jobs
+    total_panel = Panel(
+        Text(f"{stats['total_jobs']}", style="bold cyan", justify="center"),
+        title="Total Jobs",
+        border_style="dim",
+    )
+    panels.append(total_panel)
+
+    # Success rate
+    if stats['completed_jobs'] > 0:
+        rate_style = "green" if stats['success_rate'] >= 80 else "yellow" if stats['success_rate'] >= 50 else "red"
+        rate_text = Text(f"{stats['success_rate']:.1f}%", style=f"bold {rate_style}", justify="center")
+    else:
+        rate_text = Text("N/A", style="dim", justify="center")
+
+    rate_panel = Panel(
+        rate_text,
+        title="Success Rate",
+        border_style="dim",
+    )
+    panels.append(rate_panel)
+
+    # Average runtime
+    if stats['avg_runtime'] > 0:
+        if stats['avg_runtime'] < 60:
+            avg_str = f"{stats['avg_runtime']:.1f}s"
+        else:
+            mins = int(stats['avg_runtime'] // 60)
+            secs = int(stats['avg_runtime'] % 60)
+            avg_str = f"{mins}m{secs:02d}s"
+        avg_text = Text(avg_str, style="bold yellow", justify="center")
+    else:
+        avg_text = Text("N/A", style="dim", justify="center")
+
+    avg_panel = Panel(
+        avg_text,
+        title="Avg Runtime",
+        border_style="dim",
+    )
+    panels.append(avg_panel)
+
+    # Failed jobs
+    failed_panel = Panel(
+        Text(f"{stats['failed_jobs']}", style="bold red", justify="center"),
+        title="Failed",
+        border_style="dim",
+    )
+    panels.append(failed_panel)
+
+    console.print(Columns(panels, equal=True))
+    console.print()
