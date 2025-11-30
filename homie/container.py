@@ -3,6 +3,7 @@
 import os
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,8 @@ class ContainerExecutor:
     def __init__(self, config: Optional[ContainerConfig] = None):
         self.config = config or ContainerConfig()
         self._client: Optional[docker.DockerClient] = None
+        self._running_containers: dict[str, docker.models.containers.Container] = {}
+        self._container_lock = threading.Lock()
 
     @property
     def client(self) -> docker.DockerClient:
@@ -136,6 +139,10 @@ class ContainerExecutor:
             # Run container
             container = self.client.containers.run(**run_kwargs)
 
+            # Track container for potential kill
+            with self._container_lock:
+                self._running_containers[job.job_id] = container
+
             # Wait for completion
             try:
                 result = container.wait(timeout=self.config.timeout)
@@ -193,6 +200,10 @@ class ContainerExecutor:
                 error=str(e),
             )
         finally:
+            # Remove from tracking
+            with self._container_lock:
+                self._running_containers.pop(job.job_id, None)
+
             # Cleanup
             if container:
                 try:
@@ -200,6 +211,24 @@ class ContainerExecutor:
                 except Exception:
                     pass
             shutil.rmtree(workspace, ignore_errors=True)
+
+    def kill_job(self, job_id: str) -> bool:
+        """Kill a running job by ID. Returns True if killed, False if not found."""
+        with self._container_lock:
+            container = self._running_containers.get(job_id)
+
+        if container:
+            try:
+                container.kill()
+                return True
+            except Exception:
+                return False
+        return False
+
+    def get_running_job_ids(self) -> list[str]:
+        """Get list of currently running job IDs."""
+        with self._container_lock:
+            return list(self._running_containers.keys())
 
     def _prepare_workspace(self, workspace: str, job: Job) -> None:
         """Write job files to workspace directory."""

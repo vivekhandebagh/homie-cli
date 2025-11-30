@@ -110,35 +110,22 @@ class Worker:
         try:
             conn.settimeout(30.0)
 
-            # Receive job data (length-prefixed)
-            length_bytes = self._recv_exactly(conn, 4)
-            if not length_bytes:
-                return
-            length = int.from_bytes(length_bytes, "big")
-
-            # Sanity check on length
-            if length > 100 * 1024 * 1024:  # 100MB max
-                self._send_error(conn, "Job payload too large")
+            # Receive message type (1 byte)
+            msg_type = self._recv_exactly(conn, 1)
+            if not msg_type:
                 return
 
-            job_data = self._recv_exactly(conn, length)
-            if not job_data:
-                return
-
-            # Deserialize and verify job
-            try:
-                job = deserialize_job(job_data.decode(), self.config.group_secret)
-            except ValueError as e:
-                self._send_error(conn, str(e))
-                return
-
-            # Execute job
-            result = self._execute_job(job)
-
-            # Send result
-            result_data = serialize_result(result).encode()
-            conn.sendall(len(result_data).to_bytes(4, "big"))
-            conn.sendall(result_data)
+            if msg_type == b'J':
+                # Job submission
+                self._handle_job_submission(conn)
+            elif msg_type == b'K':
+                # Kill request
+                self._handle_kill_request(conn)
+            elif msg_type == b'L':
+                # List jobs request
+                self._handle_list_request(conn)
+            else:
+                self._send_error(conn, f"Unknown message type: {msg_type}")
 
         except Exception as e:
             try:
@@ -147,6 +134,136 @@ class Worker:
                 pass
         finally:
             conn.close()
+
+    def _handle_job_submission(self, conn: socket.socket) -> None:
+        """Handle a job submission request."""
+        # Receive job data (length-prefixed)
+        length_bytes = self._recv_exactly(conn, 4)
+        if not length_bytes:
+            return
+        length = int.from_bytes(length_bytes, "big")
+
+        # Sanity check on length
+        if length > 100 * 1024 * 1024:  # 100MB max
+            self._send_error(conn, "Job payload too large")
+            return
+
+        job_data = self._recv_exactly(conn, length)
+        if not job_data:
+            return
+
+        # Deserialize and verify job
+        try:
+            job = deserialize_job(job_data.decode(), self.config.group_secret)
+        except ValueError as e:
+            self._send_error(conn, str(e))
+            return
+
+        # Execute job
+        result = self._execute_job(job)
+
+        # Send result
+        result_data = serialize_result(result).encode()
+        conn.sendall(len(result_data).to_bytes(4, "big"))
+        conn.sendall(result_data)
+
+    def _handle_kill_request(self, conn: socket.socket) -> None:
+        """Handle a kill request."""
+        # Receive kill payload (length-prefixed JSON)
+        length_bytes = self._recv_exactly(conn, 4)
+        if not length_bytes:
+            return
+        length = int.from_bytes(length_bytes, "big")
+
+        payload_data = self._recv_exactly(conn, length)
+        if not payload_data:
+            return
+
+        try:
+            payload = json.loads(payload_data.decode())
+            job_id = payload["job_id"]
+            requester = payload["requester"]  # Who's requesting the kill
+            auth_hmac = payload["auth"]["hmac"]
+            timestamp = payload["auth"]["timestamp"]
+
+            # Verify auth (simple HMAC check)
+            from .jobs import verify_auth_hmac
+            if not verify_auth_hmac(job_id, timestamp, auth_hmac, self.config.group_secret):
+                conn.sendall(b'0')  # Auth failed
+                return
+
+            # Check timestamp freshness
+            if abs(time.time() - timestamp) > 300:
+                conn.sendall(b'0')  # Too old
+                return
+
+            # Check if requester is authorized to kill this job
+            # Only the original sender or the plug (local) can kill a job
+            with self._lock:
+                running_job = self._running_jobs.get(job_id)
+
+            if not running_job:
+                conn.sendall(b'0')  # Job not found
+                return
+
+            original_sender = running_job.job.sender
+            if requester != original_sender:
+                conn.sendall(b'0')  # Not authorized
+                return
+
+            # Try to kill the job
+            success = self._executor.kill_job(job_id)
+            conn.sendall(b'1' if success else b'0')
+
+        except Exception:
+            conn.sendall(b'0')
+
+    def _handle_list_request(self, conn: socket.socket) -> None:
+        """Handle a list jobs request."""
+        # Receive auth payload
+        length_bytes = self._recv_exactly(conn, 4)
+        if not length_bytes:
+            return
+        length = int.from_bytes(length_bytes, "big")
+
+        payload_data = self._recv_exactly(conn, length)
+        if not payload_data:
+            return
+
+        try:
+            payload = json.loads(payload_data.decode())
+            auth_hmac = payload["auth"]["hmac"]
+            timestamp = payload["auth"]["timestamp"]
+
+            # Verify auth
+            from .jobs import verify_auth_hmac
+            if not verify_auth_hmac("list", timestamp, auth_hmac, self.config.group_secret):
+                conn.sendall(b'0')
+                return
+
+            # Get running jobs
+            jobs_info = []
+            with self._lock:
+                for job_id, running_job in self._running_jobs.items():
+                    jobs_info.append({
+                        "job_id": job_id,
+                        "sender": running_job.job.sender,
+                        "filename": running_job.job.filename,
+                        "start_time": running_job.start_time,
+                    })
+
+            # Send response
+            response = json.dumps({"jobs": jobs_info}).encode()
+            conn.sendall(b'1')  # Success
+            conn.sendall(len(response).to_bytes(4, "big"))
+            conn.sendall(response)
+
+        except Exception:
+            conn.sendall(b'0')
+
+    def kill_job(self, job_id: str) -> bool:
+        """Kill a job running on this worker (local call)."""
+        return self._executor.kill_job(job_id)
 
     def _recv_exactly(self, conn: socket.socket, n: int) -> Optional[bytes]:
         """Receive exactly n bytes from socket."""

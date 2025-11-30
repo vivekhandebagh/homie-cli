@@ -402,16 +402,126 @@ def run(script: str, peer: str, env_name: str, image: str, files: tuple, gpu: bo
 
 
 @cli.command()
-def ps():
-    """List running jobs."""
-    console.print("[yellow]Not yet implemented - run 'homie up -f' to see running jobs in the dashboard[/]")
+@click.option("--peer", "-p", default=None, help="Query specific peer (by name)")
+@click.option("--wait", "-w", default=3, help="Seconds to wait for peer discovery")
+def ps(peer: str, wait: int):
+    """List running jobs on peers."""
+    config = get_or_create_config()
+
+    # Get peers from cache or discover
+    cached_peers = _get_peers_from_cache(config)
+
+    if cached_peers:
+        peer_list = cached_peers
+    else:
+        console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
+        discovery = Discovery(config)
+        discovery.start(listen=False)
+        time.sleep(wait)
+        peer_list = discovery.get_peers()
+        discovery.stop()
+
+    if not peer_list:
+        console.print("[yellow]No peers found[/]")
+        return
+
+    # Filter to specific peer if requested
+    if peer:
+        peer_list = [p for p in peer_list if p.name == peer]
+        if not peer_list:
+            console.print(f"[red]Peer '{peer}' not found[/]")
+            return
+
+    # Query each peer for running jobs
+    client = Client(config)
+    total_jobs = 0
+
+    for p in peer_list:
+        jobs = client.list_jobs(p)
+        if jobs is None:
+            console.print(f"[dim]{p.name}:[/] [red]connection failed[/]")
+            continue
+        if not jobs:
+            console.print(f"[dim]{p.name}:[/] no jobs running")
+            continue
+
+        console.print(f"[bold]{p.name}[/]:")
+        for job in jobs:
+            job_id = job.get("job_id", "?")
+            sender = job.get("sender", "?")
+            filename = job.get("filename", "?")
+            start_time = job.get("start_time", 0)
+            elapsed = time.time() - start_time if start_time else 0
+            elapsed_str = f"{int(elapsed)}s" if elapsed < 60 else f"{int(elapsed/60)}m{int(elapsed%60)}s"
+            console.print(f"  [cyan]{job_id}[/]  {filename}  from [green]{sender}[/]  ({elapsed_str})")
+            total_jobs += 1
+
+    if total_jobs == 0:
+        console.print("\n[dim]No jobs currently running on any peer[/]")
 
 
 @cli.command()
 @click.argument("job_id")
-def kill(job_id: str):
-    """Kill a running job."""
-    console.print("[yellow]Not yet implemented[/]")
+@click.option("--local", "-l", is_flag=True, help="Kill job running locally (as plug)")
+@click.option("--peer", "-p", default=None, help="Kill on specific peer (by name)")
+@click.option("--wait", "-w", default=3, help="Seconds to wait for peer discovery")
+def kill(job_id: str, local: bool, peer: str, wait: int):
+    """Kill a running job by ID.
+
+    As a mooch: kills jobs you sent to peers.
+    As a plug (--local): kills any job running on your machine.
+    """
+    config = get_or_create_config()
+
+    # Local kill - plug killing job on their own machine
+    if local:
+        from .container import ContainerExecutor
+        executor = ContainerExecutor()
+        if executor.kill_job(job_id):
+            console.print(f"[green]✓[/] Killed local job [cyan]{job_id}[/]")
+        else:
+            console.print(f"[yellow]Job {job_id} not found locally[/]")
+        return
+
+    # Remote kill - mooch killing their own job on a peer
+    cached_peers = _get_peers_from_cache(config)
+
+    if cached_peers:
+        peer_list = cached_peers
+    else:
+        console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
+        discovery = Discovery(config)
+        discovery.start(listen=False)
+        time.sleep(wait)
+        peer_list = discovery.get_peers()
+        discovery.stop()
+
+    if not peer_list:
+        console.print("[yellow]No peers found[/]")
+        return
+
+    client = Client(config)
+
+    # If peer specified, only try that one
+    if peer:
+        target_peers = [p for p in peer_list if p.name == peer]
+        if not target_peers:
+            console.print(f"[red]Peer '{peer}' not found[/]")
+            return
+    else:
+        target_peers = peer_list
+
+    # Try to kill on each peer
+    killed = False
+    for p in target_peers:
+        success = client.kill_job(p, job_id)
+        if success:
+            console.print(f"[green]✓[/] Killed job [cyan]{job_id}[/] on {p.name}")
+            killed = True
+            break
+
+    if not killed:
+        console.print(f"[yellow]Job {job_id} not found, not authorized, or already completed[/]")
 
 
 @cli.command()
