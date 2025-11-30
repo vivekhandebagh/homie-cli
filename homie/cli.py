@@ -16,6 +16,8 @@ from .jobs import create_job
 from .ui import (
     LiveDashboard,
     console,
+    create_history_table,
+    print_history_summary,
     print_job_complete,
     print_job_error,
     print_job_output,
@@ -672,6 +674,115 @@ def list_direct():
     console.print("[bold]Direct peers (bypass broadcast):[/]")
     for ip in existing:
         console.print(f"  {ip}")
+
+
+@cli.command()
+@click.option("--limit", "-n", default=20, help="Number of jobs to show (default: 20)")
+@click.option("--peer", "-p", default=None, help="Filter by peer name")
+@click.option("--role", "-r", type=click.Choice(["mooch", "plug"]), help="Filter by role (mooch=sent, plug=ran)")
+@click.option("--failed", is_flag=True, help="Show only failed jobs")
+@click.option("--success", is_flag=True, help="Show only successful jobs")
+@click.option("--since", "-s", default=None, help="Show jobs since (e.g., '1d', '12h', '30m')")
+@click.option("--stats", is_flag=True, help="Show summary statistics")
+@click.option("--clear", is_flag=True, help="Clear all history")
+def history(limit: int, peer: str, role: str, failed: bool, success: bool, since: str, stats: bool, clear: bool):
+    """Show job history.
+
+    Examples:
+        homie history                    # Show last 20 jobs
+        homie history -n 50              # Show last 50 jobs
+        homie history --peer raj         # Jobs involving peer 'raj'
+        homie history --role mooch       # Jobs you sent to others
+        homie history --role plug        # Jobs others ran on your machine
+        homie history --failed           # Only failed jobs
+        homie history --since 1d         # Jobs from last day
+        homie history --stats            # Show summary statistics
+        homie history --clear            # Clear all history
+    """
+    from .history import clear_history, get_history_stats, read_history
+    from rich.panel import Panel
+
+    # Handle clear
+    if clear:
+        count = clear_history()
+        console.print(f"[green]✓[/] Cleared {count} job(s) from history")
+        return
+
+    # Parse since parameter
+    since_timestamp = None
+    if since:
+        import re
+        match = re.match(r"(\d+)([dhm])", since)
+        if match:
+            value = int(match.group(1))
+            unit = match.group(2)
+            if unit == "d":
+                since_timestamp = time.time() - (value * 86400)
+            elif unit == "h":
+                since_timestamp = time.time() - (value * 3600)
+            elif unit == "m":
+                since_timestamp = time.time() - (value * 60)
+        else:
+            console.print(f"[red]Invalid --since format. Use: 1d, 12h, 30m[/]")
+            return
+
+    # Get statistics
+    history_stats = get_history_stats()
+
+    # Show stats if requested
+    if stats or history_stats["total_jobs"] == 0:
+        print_history_summary(history_stats)
+        if history_stats["total_jobs"] == 0:
+            console.print("[dim]No jobs in history yet[/]")
+            console.print("[dim]Run 'homie run <script>' to execute jobs[/]")
+            return
+        if stats:
+            # If --stats flag, just show stats and exit
+            return
+
+    # Read history with filters
+    entries = read_history(
+        limit=limit,
+        role=role,
+        peer=peer,
+        success_only=success,
+        failed_only=failed,
+        since=since_timestamp,
+    )
+
+    if not entries:
+        console.print("[yellow]No jobs found matching filters[/]")
+        return
+
+    # Build title with active filters
+    title_parts = ["JOB HISTORY"]
+    if peer:
+        title_parts.append(f"peer={peer}")
+    if role:
+        title_parts.append(f"role={role}")
+    if failed:
+        title_parts.append("failed only")
+    elif success:
+        title_parts.append("success only")
+    if since:
+        title_parts.append(f"since {since}")
+
+    title = " │ ".join(title_parts)
+
+    # Display history table
+    console.print()
+    console.print(
+        Panel(
+            create_history_table(entries, show_role=(role is None)),
+            title=f"[bold]{title}[/]",
+            subtitle=f"[dim]Showing {len(entries)} of {history_stats['total_jobs']} total jobs[/]",
+            border_style="cyan",
+        )
+    )
+    console.print()
+
+    # Show legend
+    console.print("[dim]Legend:[/] [cyan]→[/] mooch (sent) │ [green]←[/] plug (ran) │ [yellow]⚡[/] GPU")
 
 
 if __name__ == "__main__":

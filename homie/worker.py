@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 from .config import HomieConfig
 from .container import ContainerConfig, ContainerExecutor
+from .history import append_job_start, update_job_completion
 from .jobs import Job, JobResult, deserialize_job, serialize_result
 
 
@@ -295,6 +296,18 @@ class Worker:
         with self._lock:
             self._running_jobs[job.job_id] = running_job
 
+        # Log job start to history (plug perspective)
+        append_job_start(
+            job_id=job.job_id,
+            sender=job.sender,
+            peer=job.sender,  # From plug's perspective, peer is the sender
+            filename=job.filename,
+            args=job.args,
+            image=job.image,
+            require_gpu=job.require_gpu,
+            role="plug",
+        )
+
         # Notify status change
         if self.on_status_changed:
             self.on_status_changed("busy")
@@ -304,6 +317,16 @@ class Worker:
         try:
             # Execute in container
             result = self._executor.execute(job)
+
+            # Log job completion to history
+            update_job_completion(
+                job_id=job.job_id,
+                exit_code=result.exit_code,
+                runtime_seconds=result.runtime_seconds,
+                error=result.error,
+                output_file_count=len(result.output_files),
+            )
+
             return result
         finally:
             # Remove from running jobs
