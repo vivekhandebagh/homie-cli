@@ -339,19 +339,31 @@ def run(script: str, peer: str, env_name: str, image: str, files: tuple, gpu: bo
     # Print job start
     print_job_start(target_peer.name, job.job_id, job.filename, job.args)
 
-    # Send job
+    # Streaming output callbacks
+    def on_stdout(data: str):
+        # Print each chunk as it arrives (handle partial lines)
+        for line in data.splitlines(keepends=True):
+            if line.endswith('\n'):
+                print_job_output(target_peer.name, line.rstrip('\n'))
+            else:
+                # Partial line - print without newline prefix
+                console.print(f"[dim][{target_peer.name}][/] {line}", end="")
+
+    def on_stderr(data: str):
+        for line in data.splitlines(keepends=True):
+            console.print(f"[red]{line.rstrip()}")
+
+    # Send job with streaming output
     client = Client(config)
-    result = client.run_job(target_peer, job)
+    result = client.run_job(
+        target_peer,
+        job,
+        on_stdout=on_stdout,
+        on_stderr=on_stderr,
+    )
 
-    # Print output
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            print_job_output(target_peer.name, line)
-
-    if result.stderr:
-        console.print(f"\n[dim]stderr:[/]")
-        for line in result.stderr.strip().split("\n"):
-            console.print(f"[red]{line}[/]")
+    # Note: stdout/stderr already printed via streaming, but final result may have more
+    # (e.g., if connection was lost mid-stream)
 
     # Save output files
     output_files = []
