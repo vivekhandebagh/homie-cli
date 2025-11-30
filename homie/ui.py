@@ -172,6 +172,8 @@ class LiveDashboard:
             try:
                 while True:
                     live.update(self._render())
+                    # Write peer cache for other commands to use
+                    self.discovery.write_peer_cache()
                     import time
                     time.sleep(0.5)
             except KeyboardInterrupt:

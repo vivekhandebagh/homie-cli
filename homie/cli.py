@@ -101,10 +101,11 @@ def up(name: str, foreground: bool):
         dashboard = LiveDashboard(config.name, discovery, worker)
         dashboard.run()
     else:
-        # Simple event loop
+        # Simple event loop - also write peer cache periodically
         try:
             while True:
-                time.sleep(1)
+                time.sleep(2)
+                discovery.write_peer_cache()
         except KeyboardInterrupt:
             pass
 
@@ -127,10 +128,41 @@ def peers(wait: int):
     """List all peers on the network."""
     config = get_or_create_config()
 
+    # First, try to read from the peer cache file (written by homie up)
+    peer_cache = Path.home() / ".homie" / "peer_cache.json"
+    if peer_cache.exists():
+        import json
+        try:
+            cache_data = json.loads(peer_cache.read_text())
+            cache_age = time.time() - cache_data.get("timestamp", 0)
+            if cache_age < 10:  # Cache is fresh (less than 10 seconds old)
+                peer_list = [
+                    Peer(
+                        name=p["name"],
+                        ip=p["ip"],
+                        port=p["port"],
+                        cpu_percent_used=p["cpu_percent_used"],
+                        ram_free_gb=p["ram_free_gb"],
+                        ram_total_gb=p["ram_total_gb"],
+                        gpu_name=p.get("gpu_name"),
+                        gpu_memory_free_gb=p.get("gpu_memory_free_gb"),
+                        status=p["status"],
+                        last_seen=p.get("last_seen", time.time()),
+                    )
+                    for p in cache_data.get("peers", [])
+                ]
+                console.print()
+                print_peers_table(peer_list)
+                return
+        except Exception:
+            pass
+
+    # Fallback: do our own discovery (works if homie up isn't running)
     console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
+    console.print(f"[dim](For faster results, run 'homie up' in another terminal)[/]")
 
     discovery = Discovery(config)
-    discovery.start(listen=False)  # Client mode - don't bind to main port
+    discovery.start(listen=False)
 
     time.sleep(wait)
 
@@ -139,6 +171,35 @@ def peers(wait: int):
 
     console.print()
     print_peers_table(peer_list)
+
+
+def _get_peers_from_cache(config) -> list:
+    """Try to get peers from cache file."""
+    import json
+    peer_cache = Path.home() / ".homie" / "peer_cache.json"
+    if peer_cache.exists():
+        try:
+            cache_data = json.loads(peer_cache.read_text())
+            cache_age = time.time() - cache_data.get("timestamp", 0)
+            if cache_age < 10:  # Cache is fresh
+                return [
+                    Peer(
+                        name=p["name"],
+                        ip=p["ip"],
+                        port=p["port"],
+                        cpu_percent_used=p["cpu_percent_used"],
+                        ram_free_gb=p["ram_free_gb"],
+                        ram_total_gb=p["ram_total_gb"],
+                        gpu_name=p.get("gpu_name"),
+                        gpu_memory_free_gb=p.get("gpu_memory_free_gb"),
+                        status=p["status"],
+                        last_seen=p.get("last_seen", time.time()),
+                    )
+                    for p in cache_data.get("peers", [])
+                ]
+        except Exception:
+            pass
+    return None
 
 
 @cli.command()
@@ -152,30 +213,50 @@ def run(script: str, peer: str, files: tuple, gpu: bool, wait: int, args: tuple)
     """Run a script on a peer's machine."""
     config = get_or_create_config()
 
-    # Discover peers
-    console.print(f"[dim]Discovering peers...[/]")
+    # First try to get peers from cache (if homie up is running)
+    cached_peers = _get_peers_from_cache(config)
 
-    discovery = Discovery(config)
-    discovery.start(listen=False)  # Client mode - don't bind to main port
-    time.sleep(wait)
+    if cached_peers:
+        console.print(f"[dim]Using peers from running daemon...[/]")
+        peer_list = cached_peers
+    else:
+        # Fallback: do our own discovery
+        console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
+        console.print(f"[dim](For faster results, run 'homie up' in another terminal)[/]")
+
+        discovery = Discovery(config)
+        discovery.start(listen=False)
+        time.sleep(wait)
+        peer_list = discovery.get_peers()
+        discovery.stop()
 
     # Select peer
     if peer:
-        target_peer = discovery.get_peer(peer)
+        # Find peer by name
+        target_peer = next((p for p in peer_list if p.name == peer), None)
         if not target_peer:
             console.print(f"[red]Peer '{peer}' not found[/]")
-            discovery.stop()
             sys.exit(1)
     else:
-        target_peer = discovery.get_best_peer(require_gpu=gpu)
-        if not target_peer:
+        # Find best available peer
+        available = [
+            p for p in peer_list
+            if p.status == "idle" and (not gpu or p.gpu_name)
+        ]
+        if not available:
             console.print("[red]No available peers found[/]")
             if gpu:
                 console.print("[dim]Try without --gpu flag, or wait for a peer with GPU[/]")
-            discovery.stop()
             sys.exit(1)
 
-    discovery.stop()
+        # Score and pick best
+        def score(p):
+            ram_score = p.ram_free_gb
+            cpu_score = (100 - p.cpu_percent_used) / 100
+            gpu_bonus = 2.0 if p.gpu_name and gpu else 0
+            return ram_score * cpu_score + gpu_bonus
+
+        target_peer = max(available, key=score)
 
     # Create job
     try:

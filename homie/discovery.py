@@ -148,6 +148,35 @@ class Discovery:
         with self._lock:
             return [p for p in self._peers.values() if p.is_alive]
 
+    def write_peer_cache(self) -> None:
+        """Write current peers to cache file for other commands to read."""
+        import json
+        from pathlib import Path
+
+        peers = self.get_peers()
+        cache_data = {
+            "timestamp": time.time(),
+            "peers": [
+                {
+                    "name": p.name,
+                    "ip": p.ip,
+                    "port": p.port,
+                    "cpu_percent_used": p.cpu_percent_used,
+                    "ram_free_gb": p.ram_free_gb,
+                    "ram_total_gb": p.ram_total_gb,
+                    "gpu_name": p.gpu_name,
+                    "gpu_memory_free_gb": p.gpu_memory_free_gb,
+                    "status": p.status,
+                    "last_seen": p.last_seen,
+                }
+                for p in peers
+            ],
+        }
+
+        cache_file = Path.home() / ".homie" / "peer_cache.json"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(cache_data))
+
     def get_peer(self, name: str) -> Optional[Peer]:
         """Get a specific peer by name."""
         with self._lock:
