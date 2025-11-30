@@ -1,0 +1,2 @@
+[console_scripts]
+homie = homie.cli:cli

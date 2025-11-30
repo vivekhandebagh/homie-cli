@@ -1,0 +1,37 @@
+# GPU-enabled worker image for Homie Compute (ML workloads)
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+
+# Install Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
+    python3.11-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/python3.11 /usr/bin/python
+
+# Create non-root user
+RUN groupadd -g 1000 homie && \
+    useradd -u 1000 -g homie -m -s /bin/bash homie
+
+# Install ML packages
+RUN pip install --no-cache-dir \
+    torch \
+    torchvision \
+    numpy \
+    pandas \
+    scikit-learn \
+    matplotlib \
+    transformers \
+    accelerate
+
+# Set up workspace
+RUN mkdir /workspace && chown homie:homie /workspace
+WORKDIR /workspace
+
+# Switch to non-root user
+USER homie
+
+# Environment
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python"]

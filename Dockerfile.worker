@@ -1,0 +1,28 @@
+# Base worker image for Homie Compute
+FROM python:3.11-slim-bookworm
+
+# Create non-root user for security
+RUN groupadd -g 1000 homie && \
+    useradd -u 1000 -g homie -m -s /bin/bash homie
+
+# Install common packages for compute jobs
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    scikit-learn \
+    matplotlib \
+    requests \
+    pillow
+
+# Set up workspace
+RUN mkdir /workspace && chown homie:homie /workspace
+WORKDIR /workspace
+
+# Switch to non-root user
+USER homie
+
+# Environment
+ENV PYTHONUNBUFFERED=1
+
+# Default command
+CMD ["python"]

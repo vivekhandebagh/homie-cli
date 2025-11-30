@@ -1,0 +1,17 @@
+setup.py
+homie/__init__.py
+homie/cli.py
+homie/client.py
+homie/config.py
+homie/container.py
+homie/discovery.py
+homie/jobs.py
+homie/ui.py
+homie/utils.py
+homie/worker.py
+homie_compute.egg-info/PKG-INFO
+homie_compute.egg-info/SOURCES.txt
+homie_compute.egg-info/dependency_links.txt
+homie_compute.egg-info/entry_points.txt
+homie_compute.egg-info/requires.txt
+homie_compute.egg-info/top_level.txt

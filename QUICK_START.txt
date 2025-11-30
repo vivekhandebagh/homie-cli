@@ -1,0 +1,40 @@
+🏠 HOMIE COMPUTE - QUICK START
+==============================
+
+Share computing power with friends on the same network!
+
+SETUP (5 min)
+-------------
+
+1. Install Docker Desktop:
+   https://www.docker.com/products/docker-desktop/
+   (Open it after installing - wait for whale icon)
+
+2. Run these commands:
+
+   git clone <REPO_URL>
+   cd homie_cli
+   pip install -e .
+   homie setup
+
+3. When asked for "Group secret", enter:
+
+   >>> YOUR_SECRET_HERE <<<
+
+4. Start sharing:
+
+   homie up
+
+
+USE IT
+------
+
+See who's online:      homie peers
+Run your code:         homie run script.py
+Run on GPU:            homie run --gpu train.py
+Run on specific peer:  homie run -n raj script.py
+
+
+THAT'S IT! 🎉
+
+Leave "homie up" running to share your machine with the group.

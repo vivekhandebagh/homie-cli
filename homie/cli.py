@@ -1,0 +1,318 @@
+"""CLI interface for Homie Compute."""
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import click
+from rich.console import Console
+
+from . import __version__
+from .client import Client
+from .config import get_or_create_config, save_config, HomieConfig
+from .discovery import Discovery, Peer
+from .jobs import create_job
+from .ui import (
+    LiveDashboard,
+    console,
+    print_job_complete,
+    print_job_error,
+    print_job_output,
+    print_job_start,
+    print_peers_table,
+    print_startup_banner,
+)
+from .utils import get_local_ip
+from .worker import Worker
+
+
+@click.group()
+@click.version_option(version=__version__)
+def cli():
+    """🏠 Homie Compute - P2P distributed compute for friends."""
+    pass
+
+
+@cli.command()
+@click.option("--name", "-n", default=None, help="Your display name")
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground with live dashboard")
+def up(name: str, foreground: bool):
+    """Start the Homie daemon (discovery + worker)."""
+    config = get_or_create_config()
+
+    if name:
+        config.name = name
+        save_config(config)
+
+    ip = get_local_ip()
+
+    # Create worker
+    worker = Worker(config)
+
+    # Check Docker availability
+    docker_ok = worker.is_docker_available()
+    gpu_ok = worker.has_gpu_support() if docker_ok else False
+
+    # Create discovery with callbacks
+    def on_peer_joined(peer: Peer):
+        if foreground:
+            dashboard.add_event(f"[green]{peer.name}[/] joined ({peer.ip})")
+
+    def on_peer_left(peer: Peer):
+        if foreground:
+            dashboard.add_event(f"[red]{peer.name}[/] left")
+
+    def on_status_changed(status: str):
+        discovery.set_status(status)
+
+    discovery = Discovery(
+        config,
+        on_peer_joined=on_peer_joined,
+        on_peer_left=on_peer_left,
+    )
+
+    worker.on_status_changed = on_status_changed
+
+    # Print banner
+    print_startup_banner(
+        name=config.name,
+        ip=ip,
+        port=config.worker_port,
+        discovery_port=config.discovery_port,
+        docker_ok=docker_ok,
+        gpu_ok=gpu_ok,
+    )
+
+    if not docker_ok:
+        console.print("[yellow]Warning:[/] Docker is not available. Jobs will fail to execute.")
+        console.print("[dim]Install Docker and try again: https://docs.docker.com/get-docker/[/]")
+        console.print()
+
+    # Start services
+    discovery.start()
+    worker.start()
+
+    console.print("[dim]Waiting for homies... (Ctrl+C to stop)[/]")
+    console.print()
+
+    if foreground:
+        # Run live dashboard
+        dashboard = LiveDashboard(config.name, discovery, worker)
+        dashboard.run()
+    else:
+        # Simple event loop
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+    # Cleanup
+    console.print("\n[dim]Shutting down...[/]")
+    discovery.stop()
+    worker.stop()
+
+
+@cli.command()
+def down():
+    """Stop the Homie daemon."""
+    # For now, just print instructions since we're not daemonizing
+    console.print("[yellow]Use Ctrl+C to stop the daemon running in another terminal.[/]")
+
+
+@cli.command()
+@click.option("--wait", "-w", default=3, help="Seconds to wait for discovery")
+def peers(wait: int):
+    """List all peers on the network."""
+    config = get_or_create_config()
+
+    console.print(f"[dim]Discovering peers for {wait} seconds...[/]")
+
+    discovery = Discovery(config)
+    discovery.start()
+
+    time.sleep(wait)
+
+    peer_list = discovery.get_peers()
+    discovery.stop()
+
+    console.print()
+    print_peers_table(peer_list)
+
+
+@cli.command()
+@click.argument("script", type=click.Path(exists=True))
+@click.option("--peer", "-n", default=None, help="Run on specific peer (by name)")
+@click.option("--file", "-f", "files", multiple=True, help="Include additional files")
+@click.option("--gpu", is_flag=True, help="Request GPU for this job")
+@click.option("--wait", "-w", default=3, help="Seconds to wait for peer discovery")
+@click.argument("args", nargs=-1)
+def run(script: str, peer: str, files: tuple, gpu: bool, wait: int, args: tuple):
+    """Run a script on a peer's machine."""
+    config = get_or_create_config()
+
+    # Discover peers
+    console.print(f"[dim]Discovering peers...[/]")
+
+    discovery = Discovery(config)
+    discovery.start()
+    time.sleep(wait)
+
+    # Select peer
+    if peer:
+        target_peer = discovery.get_peer(peer)
+        if not target_peer:
+            console.print(f"[red]Peer '{peer}' not found[/]")
+            discovery.stop()
+            sys.exit(1)
+    else:
+        target_peer = discovery.get_best_peer(require_gpu=gpu)
+        if not target_peer:
+            console.print("[red]No available peers found[/]")
+            if gpu:
+                console.print("[dim]Try without --gpu flag, or wait for a peer with GPU[/]")
+            discovery.stop()
+            sys.exit(1)
+
+    discovery.stop()
+
+    # Create job
+    try:
+        job = create_job(
+            sender=config.name,
+            script_path=script,
+            args=list(args),
+            extra_files=list(files),
+            require_gpu=gpu,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    # Print job start
+    print_job_start(target_peer.name, job.job_id, job.filename, job.args)
+
+    # Send job
+    client = Client(config)
+    result = client.run_job(target_peer, job)
+
+    # Print output
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print_job_output(target_peer.name, line)
+
+    if result.stderr:
+        console.print(f"\n[dim]stderr:[/]")
+        for line in result.stderr.strip().split("\n"):
+            console.print(f"[red]{line}[/]")
+
+    # Save output files
+    output_files = []
+    for filename, content in result.output_files.items():
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(content)
+        output_files.append(filename)
+
+    # Print result
+    if result.error:
+        print_job_error(result.error)
+        sys.exit(1)
+    elif result.exit_code != 0:
+        print_job_error(f"Exit code: {result.exit_code}")
+        sys.exit(result.exit_code)
+    else:
+        print_job_complete(result.runtime_seconds, output_files)
+
+
+@cli.command()
+def ps():
+    """List running jobs."""
+    console.print("[yellow]Not yet implemented - run 'homie up -f' to see running jobs in the dashboard[/]")
+
+
+@cli.command()
+@click.argument("job_id")
+def kill(job_id: str):
+    """Kill a running job."""
+    console.print("[yellow]Not yet implemented[/]")
+
+
+@cli.command()
+def config():
+    """Show current configuration."""
+    cfg = get_or_create_config()
+
+    console.print("[bold]Current Configuration[/]")
+    console.print()
+    console.print(f"  [dim]Name:[/]           {cfg.name}")
+    console.print(f"  [dim]Discovery Port:[/] {cfg.discovery_port}")
+    console.print(f"  [dim]Worker Port:[/]    {cfg.worker_port}")
+    console.print(f"  [dim]Group Secret:[/]   {cfg.group_secret[:8]}...")
+    console.print()
+    console.print(f"  [dim]Container Image:[/]  {cfg.container_image}")
+    console.print(f"  [dim]CPU Limit:[/]        {cfg.container_cpu_limit} cores")
+    console.print(f"  [dim]Memory Limit:[/]     {cfg.container_memory_limit}")
+    console.print(f"  [dim]Timeout:[/]          {cfg.container_timeout}s")
+    console.print()
+    console.print(f"[dim]Config file: ~/.homie/config.yaml[/]")
+
+
+@cli.command()
+@click.option("--name", prompt="Your display name", default=lambda: os.environ.get("USER", "homie"))
+@click.option("--secret", prompt="Group secret (share with your homies)", default=None)
+def setup(name: str, secret: str):
+    """Interactive setup wizard."""
+    from .container import ContainerExecutor
+
+    console.print()
+    console.print("[bold blue]🏠 Homie Compute Setup[/]")
+    console.print()
+
+    # Check Docker
+    console.print("Checking Docker... ", end="")
+    executor = ContainerExecutor()
+    if executor.is_available():
+        console.print("[green]OK[/]")
+    else:
+        console.print("[red]NOT FOUND[/]")
+        console.print("[yellow]Please install Docker: https://docs.docker.com/get-docker/[/]")
+        console.print()
+
+    # Check GPU
+    console.print("Checking GPU support... ", end="")
+    if executor.is_available() and executor.has_gpu_support():
+        console.print("[green]OK[/]")
+    else:
+        console.print("[dim]not available[/]")
+
+    # Create config
+    config = HomieConfig(name=name)
+    if secret:
+        config.group_secret = secret
+
+    save_config(config)
+
+    console.print()
+    console.print("[green]✓[/] Configuration saved to ~/.homie/config.yaml")
+    console.print()
+    console.print("[bold]Share this with your homies:[/]")
+    console.print(f"  Group Secret: [cyan]{config.group_secret}[/]")
+    console.print()
+    console.print("Run [bold]homie up[/] to start the daemon!")
+
+
+@cli.command()
+def whoami():
+    """Show your identity."""
+    config = get_or_create_config()
+    ip = get_local_ip()
+
+    console.print(f"[bold]Name:[/]   {config.name}")
+    console.print(f"[bold]IP:[/]     {ip}")
+    console.print(f"[bold]Ports:[/]  {config.discovery_port} (discovery), {config.worker_port} (worker)")
+
+
+if __name__ == "__main__":
+    cli()
