@@ -1,0 +1,11 @@
+{
+  "experiment_name": "multi_layer_classifier",
+  "model_type": "mlp",
+  "hidden_layers": [128, 64, 32],
+  "max_iter": 50,
+  "n_samples": 2000,
+  "n_features": 30,
+  "n_classes": 3,
+  "test_size": 0.2,
+  "random_seed": 42
+}
