@@ -1,705 +1,202 @@
-# Remote Homie Network Setup
+# 🏠 Homie Compute
 
-This guide shows how to connect Homie peers across different locations (different houses, cities, countries).
+> P2P distributed compute for friends on the same network.
 
-## Two Approaches
+You and your friends are on the same wifi. Each person has a laptop/desktop with varying specs. Someone has a beefy GPU, someone else has tons of RAM. When you need to run something heavy, why not use your homies' idle machines?
 
-| Approach | Status | Dependencies | Best For |
-|----------|--------|--------------|----------|
-| **Tailscale** | Available now | Tailscale account (free) | Quick setup, works today |
-| **Native WireGuard Mesh** | Coming soon | None (fully self-hosted) | No external dependencies |
+**No cloud, no servers, no accounts. Just a CLI tool and your local network.**
 
----
-
-# Option 1: Tailscale (Available Now)
-
-This is the quickest way to get remote Homie working today using Tailscale VPN.
-
-## Why Tailscale?
-
-Homie uses UDP broadcast for peer discovery, which only works on the same local network (WiFi/LAN). To connect peers in different locations, you need a VPN to create a virtual local network.
-
-**Tailscale benefits:**
-- ✅ **Zero configuration** - No port forwarding needed
-- ✅ **Works behind NAT** - Works from anywhere (coffee shop, office, home)
-- ✅ **Encrypted** - WireGuard-based, super secure
-- ✅ **Fast** - Direct peer-to-peer connections when possible
-- ✅ **Free** - Free for personal use (up to 100 devices)
-- ✅ **Cross-platform** - Mac, Windows, Linux
-
-## Step-by-Step Setup
-
-### Step 1: Install Tailscale (Both Machines)
-
-#### On Mac:
-```bash
-brew install tailscale
+```
+┌─────────────┐     UDP broadcast      ┌─────────────┐
+│   raj's     │ ◄──────────────────►   │   mike's    │
+│   machine   │      "i'm alive"       │   machine   │
+└─────────────┘                        └─────────────┘
+       ▲                                      ▲
+       │           UDP broadcast              │
+       └──────────────► ◄─────────────────────┘
+                        │
+                        ▼
+                 ┌─────────────┐
+                 │   your      │
+                 │   machine   │
+                 └─────────────┘
 ```
 
-Or download from: https://tailscale.com/download/mac
-
-#### On Windows:
-Download installer from: https://tailscale.com/download/windows
-
-#### On Linux:
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-```
-
-### Step 2: Connect to Tailscale (Both Machines)
-
-#### Start Tailscale:
-```bash
-# Mac/Linux
-sudo tailscale up
-
-# Windows (PowerShell as Admin)
-tailscale up
-```
-
-This will open a browser window asking you to log in. Both of you should:
-1. Sign in with Google/GitHub/Microsoft (use same organization if sharing)
-2. Authorize the device
-
-### Step 3: Get Tailscale IPs (Both Machines)
+## Quick Start
 
 ```bash
-# Get your Tailscale IP
-tailscale ip -4
-```
+# Install
+pip install -e .
 
-Example outputs:
-- **Your machine:** `100.64.1.1`
-- **Friend's machine:** `100.64.1.2`
+# Setup (first time only)
+homie setup
 
-Share these IPs with each other (via text, Discord, etc.)
-
-### Step 4: Add Each Other as Direct Peers
-
-#### On Your Machine:
-```bash
-# Add your friend's Tailscale IP
-homie add 100.64.1.2
-
-# Verify it was added
-homie list-direct
-```
-
-#### On Friend's Machine:
-```bash
-# Add your Tailscale IP
-homie add 100.64.1.1
-
-# Verify it was added
-homie list-direct
-```
-
-### Step 5: Start Homie (Both Machines)
-
-```bash
+# Start the daemon
 homie up
-```
 
-You should see the startup animation and dashboard.
-
-### Step 6: Verify Connection
-
-#### On Your Machine:
-```bash
-# Check if you can see your friend
+# See who's online
 homie peers
+
+# Run a script on a friend's machine
+homie run train.py --epochs 10
 ```
 
-You should see output like:
-```
-╭─────────────────────── 🏠 HOMIES ON NETWORK ────────────────────────╮
-│ NAME     │ IP           │ CPU   │ RAM    │ GPU        │ STATUS     │
-├──────────┼──────────────┼───────┼────────┼────────────┼────────────┤
-│ bob      │ 100.64.1.2   │ 23% ▓░│ 24.1GB │ RTX 3080   │ ● idle     │
-╰──────────┴──────────────┴───────┴────────┴────────────┴────────────╯
-```
+## Features
 
-Notice the IP is the Tailscale IP (100.x.x.x)!
+- **Auto-discovery** - Finds peers automatically via UDP broadcast
+- **Secure execution** - Jobs run in Docker containers with resource limits
+- **GPU support** - Pass `--gpu` to run on a machine with a GPU
+- **Beautiful CLI** - Live dashboard showing all peers and their resources
+- **Simple auth** - Shared secret keeps random devices out
 
-### Step 7: Run Jobs Across the Internet!
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `homie up` | Start daemon (discovery + worker) |
+| `homie up -f` | Start with live dashboard |
+| `homie peers` | List all peers on network |
+| `homie run script.py` | Run on best available peer |
+| `homie run -n raj script.py` | Run on specific peer |
+| `homie run --gpu train.py` | Run on peer with GPU |
+| `homie run -f data.csv script.py` | Include additional files |
+| `homie config` | Show current configuration |
+| `homie whoami` | Show your identity |
+
+## Example Session
 
 ```bash
-# Run on your remote friend's machine
-homie run train.py --env ml-demo
+# Terminal 1 - raj's machine
+$ homie up
+╭──────────────────────────────────────╮
+│  🏠 HOMIE COMPUTE                    │
+│  Name: raj                           │
+│  IP: 192.168.1.42                    │
+│  CPU: 8 cores │ RAM: 32 GB           │
+│  GPU: RTX 3080 (10 GB)               │
+╰──────────────────────────────────────╯
+  ✓ Docker sandbox ready
+  ✓ Discovery broadcasting
+  ✓ Worker listening
 
-# Run on their GPU
-homie run train.py --env ml-demo --gpu
+# Terminal 2 - your machine
+$ homie peers
+╭────────────────────────────────────────────────────────╮
+│                  🏠 HOMIES ON NETWORK                  │
+├──────────┬──────────────┬───────┬────────┬────────────┤
+│ NAME     │ IP           │ CPU   │ RAM    │ GPU        │
+├──────────┼──────────────┼───────┼────────┼────────────┤
+│ raj      │ 192.168.1.42 │ 23% ▓░│ 24.1GB │ RTX 3080   │
+│ mike     │ 192.168.1.43 │ 12% ░░│ 8.2 GB │ -          │
+╰──────────┴──────────────┴───────┴────────┴────────────╯
 
-# Run on specific remote peer
-homie run train.py --env ml-demo --peer bob
-```
+$ homie run train.py --epochs 10
+╭─ Sending to raj (best available) ────────────────────╮
+│ Job ID: a1b2c3d4                                     │
+│ Script: train.py                                     │
+╰──────────────────────────────────────────────────────╯
 
-## Complete Example Scenario
-
-### Setup: You and Your Friend
-
-**You:** In San Francisco, MacBook Pro, no GPU
-**Friend (Bob):** In New York, gaming PC with RTX 3080
-
-### Goal: Use Bob's GPU for ML Training
-
-#### 1. Both Install Tailscale
-```bash
-# You (Mac)
-brew install tailscale
-sudo tailscale up
-
-# Bob (Windows)
-# Downloads installer, runs it
-tailscale up
-```
-
-#### 2. Exchange Tailscale IPs
-```bash
-# You check your IP
-tailscale ip -4
-# Output: 100.64.1.5
-
-# Bob checks his IP
-tailscale ip -4
-# Output: 100.64.1.12
-
-# Share via text message
-```
-
-#### 3. Add Each Other
-```bash
-# You add Bob
-homie add 100.64.1.12
-
-# Bob adds you
-homie add 100.64.1.5
-```
-
-#### 4. Start Homie
-```bash
-# Both run
-homie up
-```
-
-#### 5. You Run Training on Bob's GPU
-```bash
-# From San Francisco, using NYC GPU
-cd examples/ml-training
-homie run train.py --env ml-demo --gpu
-```
-
-Output:
-```
-╭─ Sending to bob (best available) ────────────────────────────────╮
-│ Job ID: a1b2c3d4                                                 │
-│ Script: train.py                                                 │
-╰──────────────────────────────────────────────────────────────────╯
-
-[bob] Training mlp model...
-[bob] Iteration 1, loss = 1.04640846
-[bob] Iteration 2, loss = 0.90681991
+[raj] Loading data...
+[raj] Epoch 1/10 - loss: 0.452
+[raj] Epoch 2/10 - loss: 0.321
 ...
-[bob] Test accuracy: 0.8875
-[bob] ✅ Training completed successfully!
+[raj] ✓ Saved model.pt
 
-╭─ Job Complete ─────────────────────────────────────────────────╮
-│ Runtime: 1.1s                                                  │
-│ Downloaded: model.pkl, results.json, training.log             │
-╰────────────────────────────────────────────────────────────────╯
+╭─ Job Complete ───────────────────────────────────────╮
+│ Runtime: 3m 24s                                      │
+│ Downloaded: model.pt                                 │
+╰──────────────────────────────────────────────────────╯
 ```
 
-The model trained in NYC, results downloaded to San Francisco!
+## Requirements
 
-#### 6. Check History
-```bash
-# You can see all remote jobs
-homie history
+- Python 3.10+
+- Docker (for running jobs securely)
+- Same local network as your friends
 
-# See jobs run on Bob's machine
-homie history --peer bob
+## How It Works
 
-# See statistics
-homie history --stats
+1. **Discovery**: Peers broadcast their existence via UDP every 2 seconds
+2. **Authentication**: Heartbeats are signed with a shared group secret
+3. **Job submission**: You send code to a peer over TCP
+4. **Sandboxed execution**: Code runs in a Docker container with:
+   - No network access
+   - Limited CPU/RAM
+   - Isolated filesystem
+   - Non-root user
+5. **Results**: Output streams back, files are transferred when done
+
+## Security
+
+This is designed for **trusted friends on a trusted network**. The security model:
+
+| What's Protected | How |
+|------------------|-----|
+| Random devices joining | Group secret (HMAC) |
+| Malicious code damaging host | Docker container isolation |
+| Resource exhaustion | CPU, RAM, process limits |
+| Network exfiltration | No network in container |
+
+**⚠️ Only run this on networks you trust with people you trust.**
+
+## Configuration
+
+Config is stored in `~/.homie/config.yaml`:
+
+```yaml
+name: raj
+group_secret: your-shared-secret
+discovery_port: 5555
+worker_port: 5556
+container_cpu_limit: 2.0
+container_memory_limit: 4g
+container_timeout: 600
 ```
 
-## Troubleshooting
+### Setting Resource Limits
 
-### "No peers found"
+Control how much of your machine friends can use:
 
-**Check Tailscale connection:**
 ```bash
-# Verify Tailscale is running
-tailscale status
+# Set CPU cores (e.g., 2 cores, 4 cores, 0.5 for half a core)
+homie config --cpu 4
 
-# Should show your friend's machine
+# Set memory limit (e.g., 4g, 8g, 16g)
+homie config --memory 8g
+
+# Set job timeout in seconds (default: 600 = 10 min)
+homie config --timeout 1800
+
+# View current settings
+homie config
 ```
 
-**Ping each other:**
-```bash
-# You ping Bob's Tailscale IP
-ping 100.64.1.12
+**Examples:**
+- Light usage: `homie config --cpu 1 --memory 2g`
+- Medium usage: `homie config --cpu 2 --memory 4g` (default)
+- Heavy usage: `homie config --cpu 4 --memory 8g`
+- All-in: `homie config --cpu 8 --memory 16g`
 
-# Should get responses
-```
+After changing settings, restart `homie up` for them to take effect.
 
-**Check Homie direct peers:**
+### Network Troubleshooting
+
+If peers can't find each other automatically (some routers block UDP broadcast):
+
 ```bash
+# Manually add a friend by IP address
+homie add 192.168.1.42
+
+# Your friend adds you too
+homie add 192.168.1.75
+
+# List manually added peers
 homie list-direct
 
-# Should show:
-# 100.64.1.12
+# Remove a peer
+homie remove 192.168.1.42
 ```
 
-### "Connection refused"
+## License
 
-**Make sure both are running `homie up`:**
-```bash
-# Both machines need this running
-homie up
-```
-
-**Check firewall (Windows):**
-- Windows Firewall might block Homie
-- Allow Python through firewall when prompted
-- Or manually add rule for ports 5555, 5556
-
-### "Job authentication failed"
-
-**Sync clocks:**
-```bash
-# Mac
-sudo sntp -sS time.apple.com
-
-# Windows (PowerShell as Admin)
-w32tm /resync
-
-# Linux
-sudo timedatectl set-ntp true
-```
-
-### "Tailscale IPs don't ping"
-
-**Restart Tailscale:**
-```bash
-# Mac/Linux
-sudo tailscale down
-sudo tailscale up
-
-# Windows
-# Quit Tailscale from system tray
-# Start it again
-```
-
-## Security Notes
-
-### ✅ What's Secure
-
-- **Encrypted connection** - All traffic encrypted with WireGuard
-- **No public exposure** - Your machines aren't exposed to the internet
-- **Authenticated** - Only devices you authorize can join your Tailscale network
-- **Group secret** - Homie still uses HMAC authentication with shared secret
-
-### ⚠️ Trust Model
-
-Homie is designed for **trusted friends**. Anyone on your Tailscale network with your Homie group secret can:
-- Run code on your machine (in Docker sandbox)
-- Use your CPU/RAM/GPU (up to limits you set)
-
-**Only add people you trust!**
-
-### Limiting Resource Usage
-
-```bash
-# Control what remote friends can use
-homie config --cpu 2      # Max 2 CPU cores
-homie config --memory 4g  # Max 4GB RAM
-homie config --timeout 600 # Max 10 min per job
-```
-
-## Advanced: Multiple Remote Friends
-
-You can have a whole team across different locations:
-
-```bash
-# Add all your friends' Tailscale IPs
-homie add 100.64.1.5   # Alice in SF
-homie add 100.64.1.12  # Bob in NYC
-homie add 100.64.1.23  # Charlie in London
-homie add 100.64.1.45  # David in Tokyo
-
-# Start Homie
-homie up
-
-# See everyone
-homie peers
-```
-
-Now `homie run` will automatically pick the best available peer globally!
-
-## Comparison: Tailscale vs Port Forwarding
-
-| Feature | Tailscale | Port Forwarding |
-|---------|-----------|-----------------|
-| Setup time | 5 minutes | 30+ minutes |
-| Security | Encrypted (WireGuard) | Exposed to internet |
-| NAT traversal | ✅ Works everywhere | ❌ Blocked by many ISPs |
-| Mobile/laptop | ✅ Works on any network | ❌ Only works from specific IP |
-| Multiple peers | ✅ Easy | ❌ Complex |
-| Free | ✅ Yes (personal use) | ✅ Yes |
-
-**Recommendation:** Use Tailscale. It's easier, more secure, and more reliable.
-
-## Quick Reference
-
-```bash
-# Install Tailscale
-brew install tailscale  # Mac
-# or download from tailscale.com
-
-# Connect
-sudo tailscale up
-
-# Get your IP
-tailscale ip -4
-
-# Add remote friend
-homie add 100.64.1.X
-
-# Start Homie
-homie up
-
-# Run job on remote peer
-homie run script.py --env myenv
-
-# Check connection
-homie peers
-tailscale status
-
-# Troubleshoot
-ping 100.64.1.X
-homie list-direct
-```
-
-## Need Help?
-
-- **Tailscale docs:** https://tailscale.com/kb/
-- **Homie issues:** https://github.com/yourusername/homie-cli/issues
-- **Check status:** `tailscale status` and `homie peers`
-
----
-
-# Option 2: Native WireGuard Mesh (Coming Soon)
-
-> **Status:** Design complete, implementation planned
-
-This is the long-term vision for Homie remote networking - a fully decentralized mesh with no external dependencies.
-
-## Why Native WireGuard?
-
-While Tailscale works great, it requires:
-- A Tailscale account (free but external dependency)
-- Their coordination servers (single point of failure)
-- Trust in their infrastructure
-
-The native WireGuard mesh provides:
-- **Zero external dependencies** - Everything runs on your machines
-- **Fully decentralized** - No central server or admin required
-- **Any peer can invite** - Web of trust model
-- **Open source** - WireGuard is built into the Linux kernel
-
-## Architecture: Decentralized Mesh
-
-```
-                    HOMIE NETWORK: "my-crew"
-
-    No central admin - every peer is equal
-    Anyone can invite anyone else
-
-         ┌─────────┐         ┌─────────┐         ┌─────────┐
-         │ Vivek   │◄───────►│  Raj    │◄───────►│ Priya   │
-         │(founder)│   P2P   │         │   P2P   │         │
-         └─────────┘         └─────────┘         └─────────┘
-              ▲                   │                   │
-              │                   ▼                   ▼
-              │              ┌─────────┐         ┌─────────┐
-              └─────────────►│  Alex   │◄───────►│  Sam    │
-                      P2P    │(invited │   P2P   │(invited │
-                             │ by Raj) │         │by Priya)│
-                             └─────────┘         └─────────┘
-```
-
-### Design Principles
-
-- **No central server** - Network survives as long as any peer is online
-- **Any peer can invite** - Your friends can invite their friends
-- **Out-of-band key exchange** - Share keys via text, email, Discord, etc.
-- **Gossip protocol** - New peers automatically propagate to everyone
-- **End-to-end encrypted** - All traffic encrypted via WireGuard
-
-## How It Will Work
-
-### Creating a Network (First Peer)
-
-```bash
-$ homie network create "my-crew"
-
-Creating Homie Network: my-crew
-
-Generating your WireGuard identity...
-Done! Network created.
-
-You are the first peer. To add friends:
-  homie network invite
-
-Network: my-crew
-Your ID: vivek-desktop
-Peers: just you (for now)
-```
-
-### Inviting Someone (Any Peer Can Do This)
-
-```bash
-$ homie network invite
-
-Adding a friend to "my-crew"
-
-1. Ask your friend to run: homie network join
-2. They'll give you their public key
-3. You'll give them a network bundle
-
-Paste their public key: Yj7KLm2xQ8nH4htodjb60...
-
-Name for this peer: raj-laptop
-
-Generating network bundle for raj-laptop...
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Give this to raj-laptop (copy the whole block):                 │
-│                                                                 │
-│ hm1_eyJuZXR3b3JrIjoibXktY3JldyIsImdyb3VwX3NlY3JldCI6...        │
-└─────────────────────────────────────────────────────────────────┘
-
-Waiting for raj-laptop to come online...
-Done! raj-laptop connected!
-
-Propagating raj-laptop to other peers...
-  priya-phone updated
-  alex-server updated
-
-raj-laptop is now part of my-crew
-```
-
-### Joining a Network (New Peer)
-
-```bash
-$ homie network join
-
-Joining a Homie Network
-
-Generating your WireGuard identity...
-
-┌────────────────────────────────────────────────────────────────┐
-│ Share this with whoever is inviting you:                       │
-│                                                                │
-│ Public Key: Yj7KLm2xQ8nH4htodjb60Y7YAfKp9xs...                 │
-└────────────────────────────────────────────────────────────────┘
-
-Paste the network bundle they give you: hm1_eyJuZXR3b3...
-
-Importing network: my-crew
-Found 3 existing peers in network bundle
-Configuring WireGuard tunnel...
-
-Connecting to peers...
-  vivek-desktop (direct connection)
-  priya-phone (via vivek-desktop relay)
-  alex-server (direct connection)
-
-You're in!
-
-Run 'homie peers' to see everyone
-Run 'homie run script.py' to run jobs on the network
-```
-
-### Network Status
-
-```bash
-$ homie network status
-
-HOMIE NETWORK: my-crew
-
-You: vivek-desktop
-
-Connected Peers (4):
-  NAME             STATUS    CONNECTION    INVITED BY
-  raj-laptop       idle      direct        vivek-desktop (you)
-  priya-phone      busy      relay         vivek-desktop (you)
-  alex-server      idle      direct        raj-laptop
-  sam-macbook      offline   -             priya-phone
-
-Network Stats:
-  Total compute: 12 CPUs, 48GB RAM, 2 GPUs
-  Jobs today: 23 completed, 1 running
-```
-
-## Onboarding vs Daily Use
-
-**Important distinction:**
-
-| Phase | Network Requirement |
-|-------|---------------------|
-| **Onboarding** | Inviter and invitee must be reachable (same LAN, or one has public IP, or via Tailscale for bootstrap) |
-| **After joining** | Fully remote from anywhere - works from any network |
-
-Once you've exchanged keys and joined the network, WireGuard handles everything. You can connect from:
-- Home WiFi
-- Coffee shop
-- Airport
-- Mobile hotspot
-- Work VPN
-
-The WireGuard mesh finds the best path automatically.
-
-## Key Exchange Flow
-
-```
-Onboarding: Requires reachability between inviter/invitee
-
-  Alex (new)                         Raj (existing peer)
-      │                                    │
-      │  1. Run 'homie network join'       │
-      │     Generate public key            │
-      │                                    │
-      │ ──── public key (via chat) ─────►  │
-      │                                    │
-      │                                    │  2. Run 'homie network invite'
-      │                                    │     Create network bundle
-      │                                    │
-      │  ◄── network bundle (via chat) ─── │
-      │                                    │
-      │  3. Import bundle                  │
-      │     Configure WireGuard            │
-      │                                    │
-      │ ◄════ WireGuard tunnel ══════════► │
-      │                                    │
-      │  4. Raj announces Alex to network  │
-      │                                    │
-      │ ◄════════════════════════════════► │  Vivek, Priya, etc.
-      │        Direct mesh connectivity    │
-
-After onboarding: Works from anywhere in the world
-```
-
-## Technical Details
-
-### Network Bundle Contents
-
-The bundle contains everything needed to join:
-
-```json
-{
-  "network_name": "my-crew",
-  "group_secret": "<encrypted-for-recipient>",
-  "peers": [
-    {"name": "vivek-desktop", "public_key": "...", "ip": "10.0.0.1"},
-    {"name": "priya-phone", "public_key": "...", "ip": "10.0.0.2"}
-  ],
-  "assigned_ip": "10.0.0.4",
-  "invited_by": "vivek-desktop",
-  "signature": "<signed-by-inviter>"
-}
-```
-
-### Peer Propagation (Gossip Protocol)
-
-When a new peer joins:
-
-1. Inviter creates signed peer announcement
-2. Inviter sends announcement to all known peers
-3. Each peer adds new peer to their WireGuard config
-4. Periodic sync ensures consistency for offline peers
-
-### NAT Traversal
-
-Since there's no central relay, peers help each other:
-
-```
-Alex (behind NAT) ──► Vivek (public IP) ──► Sam (behind NAT)
-```
-
-As long as at least one peer is publicly reachable, the network stays connected.
-
-### Trust Model
-
-- **Anyone can invite** - Your friends invite their friends
-- **Signature chain** - Every peer is signed by their inviter
-- **Auditable history** - You can trace who invited whom
-- **Same group_secret** - Existing HMAC job auth still works
-
-## CLI Commands (Planned)
-
-```bash
-# Network management
-homie network create <name>      # Start a new network (you're first peer)
-homie network invite             # Invite a new peer
-homie network join               # Join an existing network
-homie network status             # Show network and peer status
-homie network leave              # Leave the network
-
-# Existing commands work over WireGuard
-homie peers                      # Shows all network peers
-homie run script.py              # Can target any network peer
-homie up                         # Listens on WireGuard interface
-```
-
-## Comparison: Tailscale vs Native WireGuard Mesh
-
-| Feature | Tailscale | Native WireGuard Mesh |
-|---------|-----------|----------------------|
-| Setup effort | 5 minutes | 10-15 minutes |
-| External dependency | Tailscale account | None |
-| Central server | Tailscale's servers | None (fully P2P) |
-| NAT traversal | Automatic (their relays) | Via mesh peers |
-| Free | Yes (100 devices) | Yes (unlimited) |
-| Open source | Client only | Everything |
-| Invite model | Account-based | Any peer can invite |
-| Works if Tailscale down | No | Yes |
-
-**Recommendation:**
-- Use **Tailscale** now - it works today with minimal setup
-- Switch to **Native Mesh** when available - for full independence
-
-## Roadmap
-
-1. **Phase 1 (Available):** Tailscale integration with direct peer IPs
-2. **Phase 2a:** Core WireGuard key management and bundle format
-3. **Phase 2b:** WireGuard interface management
-4. **Phase 2c:** Gossip protocol for peer propagation
-5. **Phase 2d:** NAT relay through mesh peers
-
-## Files (When Implemented)
-
-```
-~/.homie/
-├── config.yaml                  # Existing Homie config
-├── network/
-│   ├── identity.json            # Your WireGuard keypair
-│   ├── network.json             # Network metadata
-│   └── peers/                   # All known peers
-│       ├── vivek-desktop.json
-│       ├── raj-laptop.json
-│       └── priya-phone.json
-└── wireguard/
-    └── homie0.conf              # Auto-generated WireGuard config
-```
-
----
-
-## Summary
-
-**Today:** Use Tailscale - it's quick, free, and works great.
-
-**Future:** Native WireGuard mesh will provide full independence with no external services required.
-
-Both approaches maintain the same Homie experience - `homie peers`, `homie run`, etc. work identically. The only difference is how the underlying network connectivity is established.
+MIT

@@ -1,6 +1,19 @@
-# Remote Homie Network Setup with Tailscale
+# Remote Homie Network Setup
 
-This guide shows how to connect Homie peers across different locations (different houses, cities, countries) using Tailscale VPN.
+This guide shows how to connect Homie peers across different locations (different houses, cities, countries).
+
+## Two Approaches
+
+| Approach | Status | Dependencies | Best For |
+|----------|--------|--------------|----------|
+| **Tailscale** | Available now | Tailscale account (free) | Quick setup, works today |
+| **Native WireGuard Mesh** | Coming soon | None (fully self-hosted) | No external dependencies |
+
+---
+
+# Option 1: Tailscale (Available Now)
+
+This is the quickest way to get remote Homie working today using Tailscale VPN.
 
 ## Why Tailscale?
 
@@ -373,3 +386,320 @@ homie list-direct
 - **Tailscale docs:** https://tailscale.com/kb/
 - **Homie issues:** https://github.com/yourusername/homie-cli/issues
 - **Check status:** `tailscale status` and `homie peers`
+
+---
+
+# Option 2: Native WireGuard Mesh (Coming Soon)
+
+> **Status:** Design complete, implementation planned
+
+This is the long-term vision for Homie remote networking - a fully decentralized mesh with no external dependencies.
+
+## Why Native WireGuard?
+
+While Tailscale works great, it requires:
+- A Tailscale account (free but external dependency)
+- Their coordination servers (single point of failure)
+- Trust in their infrastructure
+
+The native WireGuard mesh provides:
+- **Zero external dependencies** - Everything runs on your machines
+- **Fully decentralized** - No central server or admin required
+- **Any peer can invite** - Web of trust model
+- **Open source** - WireGuard is built into the Linux kernel
+
+## Architecture: Decentralized Mesh
+
+```
+                    HOMIE NETWORK: "my-crew"
+
+    No central admin - every peer is equal
+    Anyone can invite anyone else
+
+         ┌─────────┐         ┌─────────┐         ┌─────────┐
+         │ Vivek   │◄───────►│  Raj    │◄───────►│ Priya   │
+         │(founder)│   P2P   │         │   P2P   │         │
+         └─────────┘         └─────────┘         └─────────┘
+              ▲                   │                   │
+              │                   ▼                   ▼
+              │              ┌─────────┐         ┌─────────┐
+              └─────────────►│  Alex   │◄───────►│  Sam    │
+                      P2P    │(invited │   P2P   │(invited │
+                             │ by Raj) │         │by Priya)│
+                             └─────────┘         └─────────┘
+```
+
+### Design Principles
+
+- **No central server** - Network survives as long as any peer is online
+- **Any peer can invite** - Your friends can invite their friends
+- **Out-of-band key exchange** - Share keys via text, email, Discord, etc.
+- **Gossip protocol** - New peers automatically propagate to everyone
+- **End-to-end encrypted** - All traffic encrypted via WireGuard
+
+## How It Will Work
+
+### Creating a Network (First Peer)
+
+```bash
+$ homie network create "my-crew"
+
+Creating Homie Network: my-crew
+
+Generating your WireGuard identity...
+Done! Network created.
+
+You are the first peer. To add friends:
+  homie network invite
+
+Network: my-crew
+Your ID: vivek-desktop
+Peers: just you (for now)
+```
+
+### Inviting Someone (Any Peer Can Do This)
+
+```bash
+$ homie network invite
+
+Adding a friend to "my-crew"
+
+1. Ask your friend to run: homie network join
+2. They'll give you their public key
+3. You'll give them a network bundle
+
+Paste their public key: Yj7KLm2xQ8nH4htodjb60...
+
+Name for this peer: raj-laptop
+
+Generating network bundle for raj-laptop...
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Give this to raj-laptop (copy the whole block):                 │
+│                                                                 │
+│ hm1_eyJuZXR3b3JrIjoibXktY3JldyIsImdyb3VwX3NlY3JldCI6...        │
+└─────────────────────────────────────────────────────────────────┘
+
+Waiting for raj-laptop to come online...
+Done! raj-laptop connected!
+
+Propagating raj-laptop to other peers...
+  priya-phone updated
+  alex-server updated
+
+raj-laptop is now part of my-crew
+```
+
+### Joining a Network (New Peer)
+
+```bash
+$ homie network join
+
+Joining a Homie Network
+
+Generating your WireGuard identity...
+
+┌────────────────────────────────────────────────────────────────┐
+│ Share this with whoever is inviting you:                       │
+│                                                                │
+│ Public Key: Yj7KLm2xQ8nH4htodjb60Y7YAfKp9xs...                 │
+└────────────────────────────────────────────────────────────────┘
+
+Paste the network bundle they give you: hm1_eyJuZXR3b3...
+
+Importing network: my-crew
+Found 3 existing peers in network bundle
+Configuring WireGuard tunnel...
+
+Connecting to peers...
+  vivek-desktop (direct connection)
+  priya-phone (via vivek-desktop relay)
+  alex-server (direct connection)
+
+You're in!
+
+Run 'homie peers' to see everyone
+Run 'homie run script.py' to run jobs on the network
+```
+
+### Network Status
+
+```bash
+$ homie network status
+
+HOMIE NETWORK: my-crew
+
+You: vivek-desktop
+
+Connected Peers (4):
+  NAME             STATUS    CONNECTION    INVITED BY
+  raj-laptop       idle      direct        vivek-desktop (you)
+  priya-phone      busy      relay         vivek-desktop (you)
+  alex-server      idle      direct        raj-laptop
+  sam-macbook      offline   -             priya-phone
+
+Network Stats:
+  Total compute: 12 CPUs, 48GB RAM, 2 GPUs
+  Jobs today: 23 completed, 1 running
+```
+
+## Onboarding vs Daily Use
+
+**Important distinction:**
+
+| Phase | Network Requirement |
+|-------|---------------------|
+| **Onboarding** | Inviter and invitee must be reachable (same LAN, or one has public IP, or via Tailscale for bootstrap) |
+| **After joining** | Fully remote from anywhere - works from any network |
+
+Once you've exchanged keys and joined the network, WireGuard handles everything. You can connect from:
+- Home WiFi
+- Coffee shop
+- Airport
+- Mobile hotspot
+- Work VPN
+
+The WireGuard mesh finds the best path automatically.
+
+## Key Exchange Flow
+
+```
+Onboarding: Requires reachability between inviter/invitee
+
+  Alex (new)                         Raj (existing peer)
+      │                                    │
+      │  1. Run 'homie network join'       │
+      │     Generate public key            │
+      │                                    │
+      │ ──── public key (via chat) ─────►  │
+      │                                    │
+      │                                    │  2. Run 'homie network invite'
+      │                                    │     Create network bundle
+      │                                    │
+      │  ◄── network bundle (via chat) ─── │
+      │                                    │
+      │  3. Import bundle                  │
+      │     Configure WireGuard            │
+      │                                    │
+      │ ◄════ WireGuard tunnel ══════════► │
+      │                                    │
+      │  4. Raj announces Alex to network  │
+      │                                    │
+      │ ◄════════════════════════════════► │  Vivek, Priya, etc.
+      │        Direct mesh connectivity    │
+
+After onboarding: Works from anywhere in the world
+```
+
+## Technical Details
+
+### Network Bundle Contents
+
+The bundle contains everything needed to join:
+
+```json
+{
+  "network_name": "my-crew",
+  "group_secret": "<encrypted-for-recipient>",
+  "peers": [
+    {"name": "vivek-desktop", "public_key": "...", "ip": "10.0.0.1"},
+    {"name": "priya-phone", "public_key": "...", "ip": "10.0.0.2"}
+  ],
+  "assigned_ip": "10.0.0.4",
+  "invited_by": "vivek-desktop",
+  "signature": "<signed-by-inviter>"
+}
+```
+
+### Peer Propagation (Gossip Protocol)
+
+When a new peer joins:
+
+1. Inviter creates signed peer announcement
+2. Inviter sends announcement to all known peers
+3. Each peer adds new peer to their WireGuard config
+4. Periodic sync ensures consistency for offline peers
+
+### NAT Traversal
+
+Since there's no central relay, peers help each other:
+
+```
+Alex (behind NAT) ──► Vivek (public IP) ──► Sam (behind NAT)
+```
+
+As long as at least one peer is publicly reachable, the network stays connected.
+
+### Trust Model
+
+- **Anyone can invite** - Your friends invite their friends
+- **Signature chain** - Every peer is signed by their inviter
+- **Auditable history** - You can trace who invited whom
+- **Same group_secret** - Existing HMAC job auth still works
+
+## CLI Commands (Planned)
+
+```bash
+# Network management
+homie network create <name>      # Start a new network (you're first peer)
+homie network invite             # Invite a new peer
+homie network join               # Join an existing network
+homie network status             # Show network and peer status
+homie network leave              # Leave the network
+
+# Existing commands work over WireGuard
+homie peers                      # Shows all network peers
+homie run script.py              # Can target any network peer
+homie up                         # Listens on WireGuard interface
+```
+
+## Comparison: Tailscale vs Native WireGuard Mesh
+
+| Feature | Tailscale | Native WireGuard Mesh |
+|---------|-----------|----------------------|
+| Setup effort | 5 minutes | 10-15 minutes |
+| External dependency | Tailscale account | None |
+| Central server | Tailscale's servers | None (fully P2P) |
+| NAT traversal | Automatic (their relays) | Via mesh peers |
+| Free | Yes (100 devices) | Yes (unlimited) |
+| Open source | Client only | Everything |
+| Invite model | Account-based | Any peer can invite |
+| Works if Tailscale down | No | Yes |
+
+**Recommendation:**
+- Use **Tailscale** now - it works today with minimal setup
+- Switch to **Native Mesh** when available - for full independence
+
+## Roadmap
+
+1. **Phase 1 (Available):** Tailscale integration with direct peer IPs
+2. **Phase 2a:** Core WireGuard key management and bundle format
+3. **Phase 2b:** WireGuard interface management
+4. **Phase 2c:** Gossip protocol for peer propagation
+5. **Phase 2d:** NAT relay through mesh peers
+
+## Files (When Implemented)
+
+```
+~/.homie/
+├── config.yaml                  # Existing Homie config
+├── network/
+│   ├── identity.json            # Your WireGuard keypair
+│   ├── network.json             # Network metadata
+│   └── peers/                   # All known peers
+│       ├── vivek-desktop.json
+│       ├── raj-laptop.json
+│       └── priya-phone.json
+└── wireguard/
+    └── homie0.conf              # Auto-generated WireGuard config
+```
+
+---
+
+## Summary
+
+**Today:** Use Tailscale - it's quick, free, and works great.
+
+**Future:** Native WireGuard mesh will provide full independence with no external services required.
+
+Both approaches maintain the same Homie experience - `homie peers`, `homie run`, etc. work identically. The only difference is how the underlying network connectivity is established.
