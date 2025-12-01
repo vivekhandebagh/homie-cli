@@ -3,7 +3,7 @@
 import json
 import socket
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import HomieConfig
 from .discovery import Peer
@@ -17,14 +17,23 @@ class Client:
     def __init__(self, config: HomieConfig):
         self.config = config
 
-    def run_job(self, peer: Peer, job: Job, timeout: int = 600) -> JobResult:
+    def run_job(
+        self,
+        peer: Peer,
+        job: Job,
+        timeout: int = 600,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+    ) -> JobResult:
         """
-        Send a job to a peer and wait for the result.
+        Send a job to a peer and wait for the result, with streaming output.
 
         Args:
             peer: The peer to run the job on
             job: The job to execute
             timeout: Maximum time to wait for result (seconds)
+            on_stdout: Callback for stdout chunks (real-time streaming)
+            on_stderr: Callback for stderr chunks (real-time streaming)
 
         Returns:
             JobResult with execution output
@@ -56,57 +65,106 @@ class Client:
             sock.sendall(len(job_data).to_bytes(4, "big"))
             sock.sendall(job_data)
 
-            # Receive result (length-prefixed)
-            length_bytes = self._recv_exactly(sock, 4)
-            if not length_bytes:
-                result = JobResult(
-                    job_id=job.job_id,
-                    exit_code=-1,
-                    stdout="",
-                    stderr="",
-                    error="Connection closed by peer",
-                )
-                # Log completion
-                update_job_completion(
-                    job_id=job.job_id,
-                    exit_code=-1,
-                    runtime_seconds=0,
-                    error=result.error,
-                )
-                return result
+            # Read streaming messages until we get the final result
+            while True:
+                # Read message type (1 byte)
+                msg_type = self._recv_exactly(sock, 1)
+                if not msg_type:
+                    result = JobResult(
+                        job_id=job.job_id,
+                        exit_code=-1,
+                        stdout="",
+                        stderr="",
+                        error="Connection closed by peer",
+                    )
+                    # Log completion
+                    update_job_completion(
+                        job_id=job.job_id,
+                        exit_code=-1,
+                        runtime_seconds=0,
+                        error=result.error,
+                    )
+                    return result
 
-            length = int.from_bytes(length_bytes, "big")
-            result_data = self._recv_exactly(sock, length)
+                if msg_type == b'O':
+                    # stdout chunk
+                    length = int.from_bytes(self._recv_exactly(sock, 4), "big")
+                    data = self._recv_exactly(sock, length)
+                    if data and on_stdout:
+                        on_stdout(data.decode("utf-8", errors="replace"))
 
-            if not result_data:
-                result = JobResult(
-                    job_id=job.job_id,
-                    exit_code=-1,
-                    stdout="",
-                    stderr="",
-                    error="Failed to receive result from peer",
-                )
-                # Log completion
-                update_job_completion(
-                    job_id=job.job_id,
-                    exit_code=-1,
-                    runtime_seconds=0,
-                    error=result.error,
-                )
-                return result
+                elif msg_type == b'E':
+                    # stderr chunk
+                    length = int.from_bytes(self._recv_exactly(sock, 4), "big")
+                    data = self._recv_exactly(sock, length)
+                    if data and on_stderr:
+                        on_stderr(data.decode("utf-8", errors="replace"))
 
-            result = deserialize_result(result_data.decode())
+                elif msg_type == b'R':
+                    # Final result
+                    length = int.from_bytes(self._recv_exactly(sock, 4), "big")
+                    result_data = self._recv_exactly(sock, length)
+                    if not result_data:
+                        result = JobResult(
+                            job_id=job.job_id,
+                            exit_code=-1,
+                            stdout="",
+                            stderr="",
+                            error="Failed to receive result from peer",
+                        )
+                        # Log completion
+                        update_job_completion(
+                            job_id=job.job_id,
+                            exit_code=-1,
+                            runtime_seconds=0,
+                            error=result.error,
+                        )
+                        return result
 
-            # Log completion to history
-            update_job_completion(
-                job_id=job.job_id,
-                exit_code=result.exit_code,
-                runtime_seconds=result.runtime_seconds,
-                error=result.error,
-                output_file_count=len(result.output_files),
-            )
+                    result = deserialize_result(result_data.decode())
 
-            return result
+                    # Log completion to history
+                    update_job_completion(
+                        job_id=job.job_id,
+                        exit_code=result.exit_code,
+                        runtime_seconds=result.runtime_seconds,
+                        error=result.error,
+                        output_file_count=len(result.output_files),
+                    )
+
+                    return result
+
+                else:
+                    # Unknown message type - might be old protocol (no streaming)
+                    # Try to read as length-prefixed result
+                    length_bytes = msg_type + self._recv_exactly(sock, 3)
+                    length = int.from_bytes(length_bytes, "big")
+                    result_data = self._recv_exactly(sock, length)
+                    if result_data:
+                        result = deserialize_result(result_data.decode())
+                        # Log completion
+                        update_job_completion(
+                            job_id=job.job_id,
+                            exit_code=result.exit_code,
+                            runtime_seconds=result.runtime_seconds,
+                            error=result.error,
+                            output_file_count=len(result.output_files),
+                        )
+                        return result
+                    result = JobResult(
+                        job_id=job.job_id,
+                        exit_code=-1,
+                        stdout="",
+                        stderr="",
+                        error="Unknown response from peer",
+                    )
+                    update_job_completion(
+                        job_id=job.job_id,
+                        exit_code=-1,
+                        runtime_seconds=0,
+                        error=result.error,
+                    )
+                    return result
 
         except socket.timeout:
             result = JobResult(

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .config import HomieConfig
-from .container import ContainerConfig, ContainerExecutor
+from .container import ContainerConfig, ContainerExecutor, OutputChunk
 from .history import append_job_start, update_job_completion
 from .jobs import Job, JobResult, deserialize_job, serialize_result
 
@@ -137,7 +137,7 @@ class Worker:
             conn.close()
 
     def _handle_job_submission(self, conn: socket.socket) -> None:
-        """Handle a job submission request."""
+        """Handle a job submission request with streaming output."""
         # Receive job data (length-prefixed)
         length_bytes = self._recv_exactly(conn, 4)
         if not length_bytes:
@@ -160,10 +160,11 @@ class Worker:
             self._send_error(conn, str(e))
             return
 
-        # Execute job
-        result = self._execute_job(job)
+        # Execute job with streaming output
+        result = self._execute_job_streaming(job, conn)
 
-        # Send result
+        # Send final result (message type 'R')
+        conn.sendall(b'R')
         result_data = serialize_result(result).encode()
         conn.sendall(len(result_data).to_bytes(4, "big"))
         conn.sendall(result_data)
@@ -289,8 +290,8 @@ class Worker:
         conn.sendall(len(result_data).to_bytes(4, "big"))
         conn.sendall(result_data)
 
-    def _execute_job(self, job: Job) -> JobResult:
-        """Execute a job in a container."""
+    def _execute_job_streaming(self, job: Job, conn: socket.socket) -> JobResult:
+        """Execute a job in a container with streaming output to connection."""
         # Track running job
         running_job = RunningJob(job=job)
         with self._lock:
@@ -314,9 +315,22 @@ class Worker:
         if self.on_job_started:
             self.on_job_started(job)
 
+        def send_output_chunk(chunk: OutputChunk):
+            """Send an output chunk over the connection."""
+            try:
+                # Message type: 'O' for stdout, 'E' for stderr
+                msg_type = b'O' if chunk.stream == "stdout" else b'E'
+                data = chunk.data.encode("utf-8")
+                conn.sendall(msg_type)
+                conn.sendall(len(data).to_bytes(4, "big"))
+                conn.sendall(data)
+            except Exception:
+                pass  # Connection may be closed
+
+        result = None
         try:
-            # Execute in container
-            result = self._executor.execute(job)
+            # Execute in container with streaming
+            result = self._executor.execute_streaming(job, send_output_chunk)
 
             # Log job completion to history
             update_job_completion(
@@ -334,7 +348,7 @@ class Worker:
                 self._running_jobs.pop(job.job_id, None)
 
             # Notify completion
-            if self.on_job_completed:
+            if self.on_job_completed and result:
                 self.on_job_completed(result)
 
             # Update status if no more jobs
