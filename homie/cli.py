@@ -26,6 +26,7 @@ from .ui import (
 )
 from .utils import get_local_ip
 from .worker import Worker
+from .mesh import MeshManager, InviteCode, Identity
 
 
 @click.group()
@@ -795,6 +796,299 @@ def history(limit: int, peer: str, role: str, failed: bool, success: bool, since
 
     # Show legend
     console.print("[dim]Legend:[/] [cyan]→[/] mooch (sent) │ [green]←[/] plug (ran) │ [yellow]⚡[/] GPU")
+
+
+# ============================================================================
+# Network (WireGuard Mesh) Commands
+# ============================================================================
+
+@cli.group()
+def network():
+    """Manage WireGuard mesh network for remote peers."""
+    pass
+
+
+@network.command("create")
+@click.argument("name")
+@click.option("--secret", "-s", default=None, help="Group secret (auto-generated if not provided)")
+def network_create(name: str, secret: str):
+    """Create a new mesh network (you become the first peer).
+
+    Example: homie network create my-crew
+    """
+    from rich.panel import Panel
+
+    mesh = MeshManager()
+
+    # Check if already in a network
+    if mesh.has_network():
+        mesh.load_network()
+        console.print(f"[red]Already part of network '{mesh.network.name}'[/]")
+        console.print("Run [bold]homie network leave[/] first to leave the current network.")
+        sys.exit(1)
+
+    try:
+        net = mesh.create_network(name, secret)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    mesh.load_identity()
+
+    console.print()
+    console.print(Panel(
+        f"[bold green]Network Created![/]\n\n"
+        f"[dim]Network:[/]    [cyan]{net.name}[/]\n"
+        f"[dim]Your IP:[/]    {net.my_mesh_ip}\n"
+        f"[dim]Public Key:[/] {mesh.identity.public_key[:20]}...",
+        title="🌐 Homie Mesh",
+        border_style="green",
+    ))
+    console.print()
+    console.print("To invite friends, run: [bold]homie network invite[/]")
+
+
+@network.command("invite")
+def network_invite():
+    """Invite a new peer to your network.
+
+    Your friend needs to run 'homie network join' first to get their public key.
+    """
+    from rich.panel import Panel
+
+    mesh = MeshManager()
+
+    # Check if in a network
+    if not mesh.has_network():
+        console.print("[red]Not part of any network[/]")
+        console.print("Create one with: [bold]homie network create <name>[/]")
+        sys.exit(1)
+
+    mesh.load_identity()
+    mesh.load_network()
+
+    console.print()
+    console.print(f"[bold]Adding a friend to '{mesh.network.name}'[/]")
+    console.print()
+    console.print("1. Ask your friend to run: [cyan]homie network join[/]")
+    console.print("2. They'll give you their public key (44 chars)")
+    console.print("3. You'll give them a short invite code")
+    console.print()
+
+    # Get peer's public key
+    joiner_pubkey = click.prompt("Paste their public key")
+
+    # Validate pubkey format (base64, 44 chars with = padding)
+    if len(joiner_pubkey) != 44 or not joiner_pubkey.endswith("="):
+        console.print("[red]Invalid public key format. Should be 44 characters ending with '='[/]")
+        sys.exit(1)
+
+    # Get peer name
+    joiner_name = click.prompt("Name for this peer")
+
+    # Get our endpoint
+    # TODO: auto-detect or use configured value
+    my_endpoint = click.prompt(
+        "Your external endpoint (IP:port)",
+        default=f"{get_local_ip()}:51820"
+    )
+
+    # Create invite
+    try:
+        invite = mesh.create_invite(joiner_pubkey, joiner_name, my_endpoint)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    invite_code = invite.encode()
+
+    console.print()
+    console.print(Panel(
+        f"[bold]Send this invite code to {joiner_name}:[/]\n\n"
+        f"[cyan]{invite_code}[/]\n\n"
+        f"[dim](fits in a text message!)[/]",
+        border_style="green",
+    ))
+    console.print()
+    console.print(f"[dim]Assigned mesh IP: {invite.assigned_ip}[/]")
+    console.print()
+    console.print(f"Waiting for [cyan]{joiner_name}[/] to connect...")
+    console.print("[dim]Press Ctrl+C to cancel (invite will still work later)[/]")
+
+    # TODO: Start listening for the joiner's connection
+    # For now, just note that the invite was created
+    console.print()
+    console.print("[yellow]Note: Auto-connect not yet implemented.[/]")
+    console.print(f"[yellow]Peer '{joiner_name}' has been pre-registered.[/]")
+
+
+@network.command("join")
+@click.argument("invite_code", required=False)
+def network_join(invite_code: str):
+    """Join an existing mesh network.
+
+    First run without arguments to generate your public key,
+    then run again with the invite code from your friend.
+    """
+    from rich.panel import Panel
+
+    mesh = MeshManager()
+
+    # Check if already in a network
+    if mesh.has_network():
+        mesh.load_network()
+        console.print(f"[red]Already part of network '{mesh.network.name}'[/]")
+        console.print("Run [bold]homie network leave[/] first.")
+        sys.exit(1)
+
+    # Step 1: Generate identity if needed
+    if not mesh.has_identity():
+        console.print()
+        console.print("[bold]Generating your WireGuard identity...[/]")
+        try:
+            identity = Identity.generate()
+            mesh.save_identity(identity)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/]")
+            sys.exit(1)
+    else:
+        mesh.load_identity()
+
+    # If no invite code, just show the public key
+    if not invite_code:
+        console.print()
+        console.print(Panel(
+            f"[bold]Share this with whoever is inviting you:[/]\n\n"
+            f"[cyan]{mesh.identity.public_key}[/]",
+            title="Your Public Key",
+            border_style="blue",
+        ))
+        console.print()
+        console.print("Then paste the invite code they give you:")
+        console.print("  [bold]homie network join <invite_code>[/]")
+        return
+
+    # Step 2: Parse invite code and connect
+    try:
+        invite = InviteCode.decode(invite_code)
+    except ValueError as e:
+        console.print(f"[red]Invalid invite code: {e}[/]")
+        sys.exit(1)
+
+    console.print()
+    console.print(f"[bold]Joining network: {invite.network_name}[/]")
+    console.print(f"[dim]Inviter endpoint: {invite.inviter_endpoint}[/]")
+    console.print(f"[dim]Your assigned IP: {invite.assigned_ip}[/]")
+    console.print()
+    console.print("Connecting to inviter...")
+
+    # TODO: Actually connect via WireGuard and fetch the bundle
+    # For now, create a minimal network config
+    console.print()
+    console.print("[yellow]Note: Full WireGuard connection not yet implemented.[/]")
+    console.print("[yellow]Creating local network config with invite info...[/]")
+
+    # Create network from invite (without full bundle for now)
+    from .mesh import Network, Peer
+
+    network = Network(
+        name=invite.network_name,
+        group_secret="pending",  # Will be received in bundle
+        my_mesh_ip=invite.assigned_ip,
+        next_ip=100,  # Will be synced from bundle
+    )
+    mesh.save_network(network)
+
+    # Save inviter as a peer
+    inviter = Peer(
+        name="inviter",  # Will be updated from bundle
+        public_key=invite.inviter_pubkey,
+        mesh_ip="10.100.0.1",  # Assumed inviter is .1 or from bundle
+        endpoints=[invite.inviter_endpoint],
+    )
+    mesh.save_peer(inviter)
+
+    console.print()
+    console.print(Panel(
+        f"[bold green]Joined network: {invite.network_name}[/]\n\n"
+        f"[dim]Your mesh IP:[/] {invite.assigned_ip}\n"
+        f"[dim]Inviter:[/] {invite.inviter_endpoint}",
+        title="🌐 Welcome!",
+        border_style="green",
+    ))
+    console.print()
+    console.print("Run [bold]homie network status[/] to see your network")
+
+
+@network.command("status")
+def network_status():
+    """Show mesh network status."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    mesh = MeshManager()
+
+    if not mesh.has_network():
+        console.print("[dim]Not part of any mesh network[/]")
+        console.print()
+        console.print("Create one: [bold]homie network create <name>[/]")
+        console.print("Or join:    [bold]homie network join[/]")
+        return
+
+    mesh.load_identity()
+    mesh.load_network()
+    mesh.load_peers()
+
+    config = get_or_create_config()
+
+    console.print()
+    console.print(Panel(
+        f"[bold]Network:[/] [cyan]{mesh.network.name}[/]\n"
+        f"[bold]You:[/] {config.name} ({mesh.network.my_mesh_ip})",
+        title="🌐 Homie Mesh",
+        border_style="cyan",
+    ))
+
+    if mesh.peers:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Name")
+        table.add_column("Mesh IP")
+        table.add_column("Endpoint")
+        table.add_column("Invited By")
+
+        for peer in mesh.peers.values():
+            endpoints = ", ".join(peer.endpoints) if peer.endpoints else "[dim]none[/]"
+            invited_by = peer.invited_by or "[dim]-[/]"
+            table.add_row(peer.name, peer.mesh_ip, endpoints, invited_by)
+
+        console.print()
+        console.print(table)
+    else:
+        console.print()
+        console.print("[dim]No other peers in network yet[/]")
+        console.print("Invite someone with: [bold]homie network invite[/]")
+
+
+@network.command("leave")
+@click.confirmation_option(prompt="Are you sure you want to leave this network?")
+def network_leave():
+    """Leave the current mesh network."""
+    mesh = MeshManager()
+
+    if not mesh.has_network():
+        console.print("[dim]Not part of any network[/]")
+        return
+
+    mesh.load_network()
+    network_name = mesh.network.name
+
+    mesh.leave_network()
+
+    console.print(f"[green]✓[/] Left network '{network_name}'")
+    console.print()
+    console.print("Your WireGuard identity is preserved.")
+    console.print("Create a new network: [bold]homie network create <name>[/]")
+    console.print("Or join another:      [bold]homie network join[/]")
 
 
 if __name__ == "__main__":

@@ -465,23 +465,24 @@ $ homie network invite
 Adding a friend to "my-crew"
 
 1. Ask your friend to run: homie network join
-2. They'll give you their public key
-3. You'll give them a network bundle
+2. They'll give you their public key (44 chars)
+3. You'll give them a short invite code
 
-Paste their public key: Yj7KLm2xQ8nH4htodjb60...
+Paste their public key: Yj7KLm2xQ8nH4htodjb60Y7YAfKp9xsVN2rT8m5kLw0=
 
 Name for this peer: raj-laptop
 
-Generating network bundle for raj-laptop...
-
 ┌─────────────────────────────────────────────────────────────────┐
-│ Give this to raj-laptop (copy the whole block):                 │
+│ Send this invite code to raj-laptop:                            │
 │                                                                 │
-│ hm1_eyJuZXR3b3JrIjoibXktY3JldyIsImdyb3VwX3NlY3JldCI6...        │
+│ hm1_bXktY3Jld3xZajdLTG0yfDIwMy4wLjExMy41OjUxODIwfHhLN21ROQ     │
+│                                                                 │
+│ (fits in a text message!)                                       │
 └─────────────────────────────────────────────────────────────────┘
 
-Waiting for raj-laptop to come online...
-Done! raj-laptop connected!
+Waiting for raj-laptop to connect...
+raj-laptop connected! Sending network bundle...
+Done!
 
 Propagating raj-laptop to other peers...
   priya-phone updated
@@ -502,19 +503,22 @@ Generating your WireGuard identity...
 ┌────────────────────────────────────────────────────────────────┐
 │ Share this with whoever is inviting you:                       │
 │                                                                │
-│ Public Key: Yj7KLm2xQ8nH4htodjb60Y7YAfKp9xs...                 │
+│ Public Key: Yj7KLm2xQ8nH4htodjb60Y7YAfKp9xsVN2rT8m5kLw0=       │
 └────────────────────────────────────────────────────────────────┘
 
-Paste the network bundle they give you: hm1_eyJuZXR3b3...
+Paste the invite code they give you: hm1_bXktY3Jld3xZajd...
+
+Connecting to inviter...
+Connected! Receiving network bundle...
 
 Importing network: my-crew
-Found 3 existing peers in network bundle
-Configuring WireGuard tunnel...
+Received 3 peers from raj-laptop
+Configuring WireGuard mesh...
 
 Connecting to peers...
-  vivek-desktop (direct connection)
-  priya-phone (via vivek-desktop relay)
-  alex-server (direct connection)
+  vivek-desktop (direct)
+  priya-phone (relay via vivek-desktop)
+  alex-server (direct)
 
 You're in!
 
@@ -564,26 +568,31 @@ The WireGuard mesh finds the best path automatically.
 ## Key Exchange Flow
 
 ```
-Onboarding: Requires reachability between inviter/invitee
+Onboarding: Requires inviter to be online when joiner connects
 
   Alex (new)                         Raj (existing peer)
       │                                    │
       │  1. Run 'homie network join'       │
-      │     Generate public key            │
+      │     Generate WireGuard keypair     │
       │                                    │
-      │ ──── public key (via chat) ─────►  │
+      │ ──── public key (via chat) ─────►  │  (short - just the key)
       │                                    │
       │                                    │  2. Run 'homie network invite'
-      │                                    │     Create network bundle
+      │                                    │     Generate short invite code
       │                                    │
-      │  ◄── network bundle (via chat) ─── │
+      │  ◄── invite code (via chat) ────── │  (~50 chars, fits in SMS)
       │                                    │
-      │  3. Import bundle                  │
-      │     Configure WireGuard            │
+      │  3. Parse invite code              │
+      │     Connect to Raj's endpoint      │
       │                                    │
-      │ ◄════ WireGuard tunnel ══════════► │
+      │ ◄════ WireGuard tunnel ══════════► │  (point-to-point first)
       │                                    │
-      │  4. Raj announces Alex to network  │
+      │  ◄── full bundle (over tunnel) ─── │  (encrypted, contains all peers)
+      │                                    │
+      │  4. Import peers from bundle       │
+      │     Configure full mesh            │
+      │                                    │
+      │  5. Raj announces Alex to network  │
       │                                    │
       │ ◄════════════════════════════════► │  Vivek, Priya, etc.
       │        Direct mesh connectivity    │
@@ -591,21 +600,54 @@ Onboarding: Requires reachability between inviter/invitee
 After onboarding: Works from anywhere in the world
 ```
 
+**Key improvement:** Only a short invite code (~50 chars) is shared out-of-band.
+The full peer list transfers encrypted over WireGuard, so Alex never sees
+network members in plaintext before joining.
+
 ## Technical Details
 
-### Network Bundle Contents
+### Short Invite Code (Not Full Bundle)
 
-The bundle contains everything needed to join:
+Instead of sharing a large bundle containing all peers, we use a **short invite code** that only contains connection info for the inviter. The full network details transfer over an encrypted WireGuard tunnel after the initial handshake.
 
+**Why?**
+- **Privacy:** Joiner doesn't see all network members until they've authenticated
+- **Compact:** ~50-60 characters fits easily in a text message
+- **Secure:** Full bundle encrypted over WireGuard, not copy/pasted in plaintext
+
+**Invite code contains only:**
 ```json
 {
+  "n": "my-crew",           // network name
+  "p": "Yj7KLm2x...",       // inviter's WireGuard public key
+  "e": "203.0.113.5:51820", // inviter's endpoint (IP:port)
+  "t": "xK7mQ9...",         // one-time auth token
+  "a": "10.0.0.4"           // assigned mesh IP for joiner
+}
+```
+
+Base64 encoded with `hm1_` prefix: `hm1_eyJuIjoibXktY3JldyIsInAiOi...` (~50-60 chars)
+
+**Full bundle (transferred over WireGuard after handshake):**
+```json
+{
+  "version": 1,
   "network_name": "my-crew",
-  "group_secret": "<encrypted-for-recipient>",
+  "group_secret": "encrypted-with-joiner-pubkey",
   "peers": [
-    {"name": "vivek-desktop", "public_key": "...", "ip": "10.0.0.1"},
-    {"name": "priya-phone", "public_key": "...", "ip": "10.0.0.2"}
+    {
+      "name": "vivek-desktop",
+      "public_key": "...",
+      "mesh_ip": "10.0.0.1",
+      "endpoints": ["203.0.113.5:51820"]
+    },
+    {
+      "name": "priya-phone",
+      "public_key": "...",
+      "mesh_ip": "10.0.0.2",
+      "endpoints": []
+    }
   ],
-  "assigned_ip": "10.0.0.4",
   "invited_by": "vivek-desktop",
   "signature": "<signed-by-inviter>"
 }

@@ -10,6 +10,7 @@ setup(
         "rich>=13.0",
         "docker>=7.0.0",
         "pyyaml>=6.0",
+        "cryptography>=41.0",  # For WireGuard key generation
     ],
     entry_points={
         "console_scripts": [
