@@ -1,10 +1,11 @@
 # 🏠 Homie Compute
+'''
     __  ______  __  _____________    _______ ______
    / / / / __ \/  |/  /  _/ ____/   /  ____//  __  \
   / /_/ / / / / /|_/ // // __/     /  /    /  / /  /
  / __  / /_/ / /  / // // /___    /  /___ /  /_/  /
 /_/ /_/\____/_/  /_/___/_____/   /_______/\______/ mpute
-
+'''
 > P2P distributed compute for friends on the same network.
 
 You and your friends are on the same wifi. Each person has a laptop/desktop with varying specs. Someone has a beefy GPU, someone else has tons of RAM. When you need to run something heavy, why not use your homies' idle machines?
