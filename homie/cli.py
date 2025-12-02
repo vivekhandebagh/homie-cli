@@ -110,13 +110,53 @@ def env_remove(name: str):
 
 @cli.command()
 @click.option("--name", "-n", default=None, help="Your display name")
-def up(name: str):
-    """Start the Homie daemon (discovery + worker)."""
+@click.option("--mesh", is_flag=True, help="Enable WireGuard mesh for remote peers")
+def up(name: str, mesh: bool):
+    """Start the Homie daemon (discovery + worker).
+
+    Use --mesh to enable the WireGuard mesh network for connecting
+    to remote peers outside your local network.
+    """
     config = get_or_create_config()
 
     if name:
         config.name = name
         save_config(config)
+
+    # Handle mesh tunnel if requested
+    mesh_manager = None
+    if mesh:
+        mesh_manager = MeshManager()
+
+        if not mesh_manager.has_network():
+            console.print("[red]Not part of a mesh network.[/]")
+            console.print()
+            console.print("Create one: [bold]homie network create <name>[/]")
+            console.print("Or join:    [bold]homie network join <invite_code>[/]")
+            sys.exit(1)
+
+        mesh_manager.load_identity()
+        mesh_manager.load_network()
+        mesh_manager.load_peers()
+
+        console.print()
+        console.print("[bold cyan]Starting WireGuard mesh tunnel...[/]")
+        if mesh_manager.peers:
+            console.print(f"[dim]Network: {mesh_manager.network.name} | Peers: {len(mesh_manager.peers)}[/]")
+        console.print("[dim]You may be prompted for your password (sudo required)[/]")
+        console.print()
+
+        try:
+            if not mesh_manager.tunnel_up():
+                console.print("[red]Failed to bring up WireGuard tunnel[/]")
+                console.print("[dim]Check that wireguard-tools is installed[/]")
+                sys.exit(1)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/]")
+            sys.exit(1)
+
+        console.print(f"[green]Mesh tunnel active:[/] {mesh_manager.network.my_mesh_ip}")
+        console.print()
 
     ip = get_local_ip()
 
@@ -143,6 +183,12 @@ def up(name: str):
         on_peer_left=on_peer_left,
     )
 
+    # Add mesh peers to discovery's direct peer list
+    if mesh_manager and mesh_manager.peers:
+        for peer in mesh_manager.peers.values():
+            if peer.mesh_ip != mesh_manager.network.my_mesh_ip:
+                discovery.add_direct_peer(peer.mesh_ip)
+
     worker.on_status_changed = on_status_changed
 
     # Start services
@@ -151,12 +197,18 @@ def up(name: str):
 
     # Run live dashboard
     dashboard = LiveDashboard(config.name, discovery, worker, docker_ok, gpu_ok)
-    dashboard.run()
 
-    # Cleanup
-    console.print("\n[dim]Shutting down...[/]")
-    discovery.stop()
-    worker.stop()
+    try:
+        dashboard.run()
+    finally:
+        # Cleanup
+        console.print("\n[dim]Shutting down...[/]")
+        discovery.stop()
+        worker.stop()
+
+        if mesh_manager and mesh_manager.is_tunnel_up():
+            console.print("[dim]Stopping mesh tunnel...[/]")
+            mesh_manager.tunnel_down()
 
 
 @cli.command()
@@ -1089,6 +1141,89 @@ def network_leave():
     console.print("Your WireGuard identity is preserved.")
     console.print("Create a new network: [bold]homie network create <name>[/]")
     console.print("Or join another:      [bold]homie network join[/]")
+
+
+@network.command("up")
+def network_tunnel_up():
+    """Bring up the WireGuard mesh tunnel.
+
+    This creates the network interface and connects to peers.
+    Requires sudo - you may be prompted for your password.
+
+    Note: The tunnel is automatically started when you run 'homie up --mesh'.
+    Use this command if you want to bring up just the tunnel without the daemon.
+    """
+    from .mesh import INTERFACE_NAME
+
+    mesh = MeshManager()
+
+    if not mesh.has_network():
+        console.print("[red]Not part of a mesh network.[/]")
+        console.print()
+        console.print("Create one: [bold]homie network create <name>[/]")
+        console.print("Or join:    [bold]homie network join[/]")
+        sys.exit(1)
+
+    mesh.load_identity()
+    mesh.load_network()
+    mesh.load_peers()
+
+    if mesh.is_tunnel_up():
+        console.print(f"[yellow]Mesh tunnel already up[/]")
+        console.print(f"  Interface: {INTERFACE_NAME}")
+        console.print(f"  Your IP: {mesh.network.my_mesh_ip}")
+        return
+
+    if not mesh.peers:
+        console.print("[yellow]Warning:[/] No peers configured yet.")
+        console.print("The tunnel will start but won't connect to anyone.")
+        console.print("Add peers with: [bold]homie network invite[/]")
+        console.print()
+
+    console.print("[bold]Bringing up WireGuard mesh tunnel...[/]")
+    console.print("[dim]You may be prompted for your password[/]")
+
+    try:
+        if mesh.tunnel_up():
+            console.print()
+            console.print(f"[green]Mesh tunnel up![/]")
+            console.print(f"  Interface: {INTERFACE_NAME}")
+            console.print(f"  Your mesh IP: {mesh.network.my_mesh_ip}")
+            console.print(f"  Network: {mesh.network.name}")
+            console.print(f"  Peers configured: {len(mesh.peers)}")
+            console.print()
+            console.print("[dim]Verify with: sudo wg show[/]")
+        else:
+            console.print("[red]Failed to bring up tunnel[/]")
+            sys.exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+
+@network.command("down")
+def network_tunnel_down():
+    """Bring down the WireGuard mesh tunnel.
+
+    This removes the network interface. Requires sudo.
+    """
+    from .mesh import INTERFACE_NAME, WIREGUARD_DIR
+
+    mesh = MeshManager()
+
+    if not mesh.is_tunnel_up():
+        console.print("[dim]Mesh tunnel is not running[/]")
+        return
+
+    console.print("[bold]Bringing down WireGuard mesh tunnel...[/]")
+
+    if mesh.tunnel_down():
+        console.print("[green]Mesh tunnel down[/]")
+    else:
+        console.print("[red]Failed to bring down tunnel[/]")
+        config_path = WIREGUARD_DIR / f"{INTERFACE_NAME}.conf"
+        console.print(f"[dim]Try manually: sudo wg-quick down {config_path}[/]")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

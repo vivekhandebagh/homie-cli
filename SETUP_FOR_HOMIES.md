@@ -173,11 +173,18 @@ Leave `homie up` running in a terminal while you're on the network. Your idle ma
 | Command | What it does |
 |---------|--------------|
 | `homie up` | Start sharing your machine |
+| `homie up --mesh` | Start with WireGuard mesh (for remote friends) |
 | `homie peers` | See who's online |
 | `homie run script.py` | Run code on a friend's machine |
 | `homie run --gpu script.py` | Run on a machine with GPU |
 | `homie config` | See your settings |
 | `homie whoami` | See your name and IP |
+
+---
+
+## Remote Friends? (Not on same WiFi)
+
+If you want to connect with friends across the internet (not just local network), see [REMOTE_SETUP.md](REMOTE_SETUP.md) for WireGuard mesh setup.
 
 ---
 

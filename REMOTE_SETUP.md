@@ -389,9 +389,9 @@ homie list-direct
 
 ---
 
-# Option 2: Native WireGuard Mesh (Coming Soon)
+# Option 2: Native WireGuard Mesh (Available!)
 
-> **Status:** Design complete, implementation planned
+> **Status:** Core implementation complete. Tunnel setup works, full bundle transfer over WireGuard is TODO.
 
 This is the long-term vision for Homie remote networking - a fully decentralized mesh with no external dependencies.
 
@@ -709,18 +709,44 @@ homie up                         # Listens on WireGuard interface
 | Works if Tailscale down | No | Yes |
 
 **Recommendation:**
-- Use **Tailscale** now - it works today with minimal setup
-- Switch to **Native Mesh** when available - for full independence
+- Use **Tailscale** if you want zero setup
+- Use **Native Mesh** for full independence (now available!)
 
 ## Roadmap
 
 1. **Phase 1 (Available):** Tailscale integration with direct peer IPs
-2. **Phase 2a:** Core WireGuard key management and bundle format
-3. **Phase 2b:** WireGuard interface management
-4. **Phase 2c:** Gossip protocol for peer propagation
-5. **Phase 2d:** NAT relay through mesh peers
+2. **Phase 2a (Complete):** Core WireGuard key management and bundle format
+3. **Phase 2b (Complete):** WireGuard interface management (`homie up --mesh`)
+4. **Phase 2c (TODO):** Gossip protocol for peer propagation
+5. **Phase 2d (TODO):** NAT relay through mesh peers
 
-## Files (When Implemented)
+## Quick Start: Native Mesh
+
+```bash
+# Install WireGuard
+brew install wireguard-tools  # macOS
+# or: sudo apt install wireguard-tools  # Linux
+
+# First peer creates network
+homie network create my-crew
+
+# Second peer gets their public key
+homie network join
+# Share the public key with first peer
+
+# First peer invites second peer
+homie network invite
+# Enter second peer's public key when prompted
+# Share the invite code with second peer
+
+# Second peer joins
+homie network join <invite-code>
+
+# Both start with mesh
+homie up --mesh
+```
+
+## File Locations
 
 ```
 ~/.homie/
@@ -740,8 +766,8 @@ homie up                         # Listens on WireGuard interface
 
 ## Summary
 
-**Today:** Use Tailscale - it's quick, free, and works great.
+**Tailscale:** Easier setup, requires account, uses their servers.
 
-**Future:** Native WireGuard mesh will provide full independence with no external services required.
+**Native Mesh:** No external dependencies, full P2P, requires WireGuard tools.
 
 Both approaches maintain the same Homie experience - `homie peers`, `homie run`, etc. work identically. The only difference is how the underlying network connectivity is established.

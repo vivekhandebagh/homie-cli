@@ -17,6 +17,7 @@ homie setup
 
 # Start daemon (discovery + worker)
 homie up
+homie up --mesh              # With WireGuard mesh for remote peers
 
 # List available peers
 homie peers
@@ -31,9 +32,19 @@ homie env add <name> <docker-image>
 # View/edit configuration
 homie config show
 homie config set <key> <value>
+
+# Mesh network management (for remote peers across internet)
+homie network create <name>  # Create new mesh network
+homie network join           # Generate public key for joining
+homie network join <code>    # Join with invite code
+homie network invite         # Create invite for new peer
+homie network status         # Show network and peers
+homie network up             # Bring up WireGuard tunnel manually
+homie network down           # Tear down WireGuard tunnel
+homie network leave          # Leave the mesh network
 ```
 
-**Requirements:** Python 3.10+, Docker
+**Requirements:** Python 3.10+, Docker, WireGuard (for mesh networking)
 
 ## Architecture
 
@@ -63,6 +74,7 @@ homie run → Client connects to peer's Worker → Worker spawns Docker containe
 | `client.py` | TCP client for submitting jobs to workers |
 | `history.py` | Job history tracking (JSONL format) |
 | `config.py` | Config management (~/.homie/config.yaml) |
+| `mesh.py` | WireGuard mesh network management |
 | `ui.py` | Rich terminal UI components and animations |
 | `utils.py` | System monitoring (CPU, RAM, GPU) |
 
@@ -78,6 +90,10 @@ Binary message format: `type (1 byte) + length (4 bytes) + data`
 - Config: `~/.homie/config.yaml`
 - History: `~/.homie/job_history.jsonl`
 - Peer cache: `~/.homie/peer_cache.json`
+- Mesh identity: `~/.homie/network/identity.json`
+- Mesh network: `~/.homie/network/network.json`
+- Mesh peers: `~/.homie/network/peers/*.json`
+- WireGuard config: `~/.homie/wireguard/homie0.conf`
 
 ## Adding New CLI Commands
 

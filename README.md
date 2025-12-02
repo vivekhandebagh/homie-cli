@@ -1,4 +1,9 @@
 # 🏠 Homie Compute
+    __  ______  __  _____________    _______ ______
+   / / / / __ \/  |/  /  _/ ____/   /  ____//  __  \
+  / /_/ / / / / /|_/ // // __/     /  /    /  / /  /
+ / __  / /_/ / /  / // // /___    /  /___ /  /_/  /
+/_/ /_/\____/_/  /_/___/_____/   /_______/\______/ mpute
 
 > P2P distributed compute for friends on the same network.
 
@@ -196,6 +201,65 @@ homie list-direct
 # Remove a peer
 homie remove 192.168.1.42
 ```
+
+## Remote Peers (WireGuard Mesh)
+
+Want to connect with friends across the internet, not just your local network? Homie supports a WireGuard mesh network for remote peers.
+
+**Requirements:** Install WireGuard tools first:
+```bash
+# macOS
+brew install wireguard-tools
+
+# Linux
+sudo apt install wireguard-tools
+```
+
+### Creating a Mesh Network
+
+```bash
+# First person creates the network
+homie network create my-crew
+
+# Get your public key
+homie network join
+# Share the displayed public key with your friend
+```
+
+### Inviting a Friend
+
+```bash
+# You run (paste their public key when prompted)
+homie network invite
+# Share the invite code with your friend (~60 chars, fits in a text)
+
+# They run
+homie network join <invite-code>
+```
+
+### Starting with Mesh
+
+```bash
+# Start daemon with WireGuard mesh tunnel
+homie up --mesh
+
+# You'll be prompted for sudo password (WireGuard needs it)
+# Now you can see and run jobs on remote peers!
+```
+
+### Mesh Commands
+
+| Command | Description |
+|---------|-------------|
+| `homie network create <name>` | Create new mesh network |
+| `homie network join` | Show public key / join with code |
+| `homie network invite` | Generate invite for new peer |
+| `homie network status` | Show network and peer info |
+| `homie network up` | Bring up tunnel (standalone) |
+| `homie network down` | Tear down tunnel |
+| `homie network leave` | Leave the mesh network |
+
+See [REMOTE_SETUP.md](REMOTE_SETUP.md) for detailed instructions.
 
 ## License
 

@@ -505,3 +505,114 @@ class MeshManager:
         # TODO: Implement STUN-like discovery or use configured value
         # For now, return None (peers will need to specify manually)
         return None
+
+    # =========================================================================
+    # WireGuard Tunnel Management
+    # =========================================================================
+
+    def generate_wireguard_config(self) -> Path:
+        """Generate WireGuard configuration file from network state.
+
+        Returns:
+            Path to the generated config file at ~/.homie/wireguard/homie0.conf
+        """
+        if not self.identity or not self.network:
+            raise RuntimeError("No identity or network configured")
+
+        self.load_peers()
+
+        config_lines = [
+            "[Interface]",
+            f"PrivateKey = {self.identity.private_key}",
+            f"Address = {self.network.my_mesh_ip}/16",
+            f"ListenPort = {WIREGUARD_PORT}",
+            "",
+        ]
+
+        # Add each peer section
+        for peer in self.peers.values():
+            config_lines.append("[Peer]")
+            config_lines.append(f"PublicKey = {peer.public_key}")
+            config_lines.append(f"AllowedIPs = {peer.mesh_ip}/32")
+            if peer.endpoints:
+                config_lines.append(f"Endpoint = {peer.endpoints[0]}")
+            config_lines.append("PersistentKeepalive = 25")
+            config_lines.append("")
+
+        # Write config file with secure permissions
+        config_path = WIREGUARD_DIR / f"{INTERFACE_NAME}.conf"
+        WIREGUARD_DIR.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("\n".join(config_lines))
+        os.chmod(config_path, 0o600)
+
+        return config_path
+
+    def tunnel_up(self) -> bool:
+        """Bring up the WireGuard tunnel using wg-quick.
+
+        Requires sudo. The user will be prompted for their password inline.
+
+        Returns:
+            True if successful, False otherwise.
+
+        Raises:
+            RuntimeError: If wg-quick is not installed.
+        """
+        # Generate/update config first
+        config_path = self.generate_wireguard_config()
+
+        # Check if already up
+        if self.is_tunnel_up():
+            return True
+
+        try:
+            # Let sudo prompt interactively for password
+            result = subprocess.run(
+                ["sudo", "wg-quick", "up", str(config_path)],
+                timeout=60,
+            )
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+        except FileNotFoundError:
+            raise RuntimeError(
+                "wg-quick not found. Install WireGuard tools:\n"
+                "  macOS:  brew install wireguard-tools\n"
+                "  Linux:  sudo apt install wireguard-tools"
+            )
+
+    def tunnel_down(self) -> bool:
+        """Bring down the WireGuard tunnel.
+
+        Returns:
+            True if successful or tunnel was not up.
+        """
+        config_path = WIREGUARD_DIR / f"{INTERFACE_NAME}.conf"
+
+        if not config_path.exists():
+            return True  # Nothing to bring down
+
+        if not self.is_tunnel_up():
+            return True  # Already down
+
+        try:
+            result = subprocess.run(
+                ["sudo", "wg-quick", "down", str(config_path)],
+                capture_output=True,
+                timeout=30,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def is_tunnel_up(self) -> bool:
+        """Check if the WireGuard tunnel interface exists and is up."""
+        try:
+            result = subprocess.run(
+                ["sudo", "wg", "show", INTERFACE_NAME],
+                capture_output=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
