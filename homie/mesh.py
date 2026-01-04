@@ -563,10 +563,21 @@ class MeshManager:
 
         # Check if already up
         if self.is_tunnel_up():
-            return True
+            # Bring down first to apply any config changes
+            self.tunnel_down()
 
         try:
             # Let sudo prompt interactively for password
+            result = subprocess.run(
+                ["sudo", "wg-quick", "up", str(config_path)],
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+
+            # If it failed because interface exists, try bringing down first
+            # This handles edge cases where is_tunnel_up() returned False but interface exists
+            self.tunnel_down()
             result = subprocess.run(
                 ["sudo", "wg-quick", "up", str(config_path)],
                 timeout=60,
@@ -592,27 +603,45 @@ class MeshManager:
         if not config_path.exists():
             return True  # Nothing to bring down
 
-        if not self.is_tunnel_up():
-            return True  # Already down
-
         try:
+            # Always try to bring down - don't check is_tunnel_up() first
+            # as the check can be unreliable on macOS
             result = subprocess.run(
                 ["sudo", "wg-quick", "down", str(config_path)],
-                capture_output=True,
                 timeout=30,
             )
-            return result.returncode == 0
-        except Exception:
+            # Return True if successful OR if it was already down (exit code varies)
+            return True
+        except subprocess.TimeoutExpired:
             return False
+        except Exception:
+            # If wg-quick down fails, tunnel is likely already down
+            return True
 
     def is_tunnel_up(self) -> bool:
         """Check if the WireGuard tunnel interface exists and is up."""
         try:
+            # Use 'wg show' without sudo first - it can show interface names without root
+            # On macOS, the interface shows up as utunX but wg-quick tracks it
             result = subprocess.run(
-                ["sudo", "wg", "show", INTERFACE_NAME],
+                ["wg", "show", "interfaces"],
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0
+            if result.returncode == 0:
+                interfaces = result.stdout.decode().strip().split()
+                # Check if our interface name is in the list
+                if INTERFACE_NAME in interfaces:
+                    return True
+
+            # Fallback: check if the config is tracked by wg-quick on macOS
+            # wg-quick on macOS stores state in /var/run/wireguard/
+            import platform
+            if platform.system() == "Darwin":
+                state_file = Path(f"/var/run/wireguard/{INTERFACE_NAME}.name")
+                if state_file.exists():
+                    return True
+
+            return False
         except Exception:
             return False
