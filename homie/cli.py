@@ -953,54 +953,73 @@ def network_invite():
     joiner_name = click.prompt("Name for this peer")
 
     console.print()
-    console.print("[bold]Detecting best connection method...[/]")
 
-    # Smart endpoint detection
-    endpoint, method = mesh.get_best_endpoint()
+    # Bootstrap case: First peer in network (use LAN)
+    num_peers = len(mesh.peers)
+    if num_peers == 0:
+        console.print("[bold]First peer - using local network connection[/]")
+        console.print("[dim]Make sure your friend is on the same WiFi/LAN[/]")
+        console.print()
 
-    if method == "tailscale":
-        console.print(f"[green]✓ Tailscale connection available[/]")
-        console.print(f"[dim]  Endpoint: {endpoint}[/]")
+        from .utils import get_local_ip
+        local_ip = get_local_ip()
+        endpoint = f"{local_ip}:51820"
+
+        console.print(f"[green]✓ Local network connection[/]")
+        console.print(f"[dim]  Your local IP: {endpoint}[/]")
+
         invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
+        method = "lan"
 
-    elif method == "stun":
-        console.print(f"[green]✓ Direct connection available (via STUN)[/]")
-        console.print(f"[dim]  Public endpoint: {endpoint}[/]")
-        invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
+    else:
+        # Network has peers - use smart detection
+        console.print("[bold]Detecting best connection method...[/]")
 
-    elif method == "relay":
-        relay_peers = mesh.find_relay_peers()
-        if relay_peers:
-            relay_peer = relay_peers[0]
-            console.print(f"[yellow]⚠ No direct connection possible[/]")
-            console.print(f"[cyan]→ Using mesh relay: {relay_peer.name}[/]")
-            console.print(f"[dim]  Relay endpoint: {relay_peer.endpoints[0]}[/]")
+        endpoint, method = mesh.get_best_endpoint()
 
-            invite = mesh.create_invite_via_relay(joiner_pubkey, joiner_name, relay_peer)
+        if method == "tailscale":
+            console.print(f"[green]✓ Tailscale connection available[/]")
+            console.print(f"[dim]  Endpoint: {endpoint}[/]")
+            invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
 
-            # Register with relay peer
-            try:
-                mesh.register_with_relay(relay_peer, invite)
-                console.print(f"[green]✓ Registered with relay peer[/]")
-            except RuntimeError as e:
-                console.print(f"[red]Failed to register with relay: {e}[/]")
-                console.print("[yellow]Invite code created but relay may not work[/]")
-        else:
-            method = "manual"  # Fall through to manual
+        elif method == "stun":
+            console.print(f"[green]✓ Direct connection available (via STUN)[/]")
+            console.print(f"[dim]  Public endpoint: {endpoint}[/]")
+            invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
 
-    if method == "manual":
-        console.print("[red]✗ No automatic connection method available[/]")
-        console.print()
-        console.print("Options:")
-        console.print("  1. [cyan]Install Tailscale[/] (recommended - easiest)")
-        console.print("     brew install tailscale && sudo tailscale up")
-        console.print()
-        console.print("  2. [cyan]Set up port forwarding[/] on your router")
-        console.print("     Forward UDP port 51820 to this machine")
-        console.print()
-        console.print("  3. [cyan]Wait until same LAN[/] as your friend")
-        console.print()
-        sys.exit(1)
+        elif method == "relay":
+            relay_peers = mesh.find_relay_peers()
+            if relay_peers:
+                relay_peer = relay_peers[0]
+                console.print(f"[yellow]⚠ No direct connection possible[/]")
+                console.print(f"[cyan]→ Using mesh relay: {relay_peer.name}[/]")
+                console.print(f"[dim]  Relay endpoint: {relay_peer.endpoints[0]}[/]")
+
+                invite = mesh.create_invite_via_relay(joiner_pubkey, joiner_name, relay_peer)
+
+                # Register with relay peer
+                try:
+                    mesh.register_with_relay(relay_peer, invite)
+                    console.print(f"[green]✓ Registered with relay peer[/]")
+                except RuntimeError as e:
+                    console.print(f"[red]Failed to register with relay: {e}[/]")
+                    console.print("[yellow]Invite code created but relay may not work[/]")
+            else:
+                method = "manual"  # Fall through to manual
+
+        if method == "manual":
+            console.print("[red]✗ No automatic connection method available[/]")
+            console.print()
+            console.print("Options:")
+            console.print("  1. [cyan]Install Tailscale[/] (recommended - easiest)")
+            console.print("     brew install tailscale && sudo tailscale up")
+            console.print()
+            console.print("  2. [cyan]Set up port forwarding[/] on your router")
+            console.print("     Forward UDP port 51820 to this machine")
+            console.print()
+            console.print("  3. [cyan]Wait until same LAN[/] as your friend")
+            console.print()
+            sys.exit(1)
 
     invite_code = invite.encode()
 
