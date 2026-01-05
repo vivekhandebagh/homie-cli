@@ -13,12 +13,14 @@ import base64
 import json
 import os
 import secrets
+import socket
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .config import HOMIE_DIR
+from .config import HOMIE_DIR, get_or_create_config
 
 
 # Mesh network directories
@@ -30,6 +32,7 @@ WIREGUARD_DIR = HOMIE_DIR / "wireguard"
 MESH_SUBNET = "10.100.0.0/16"  # Private subnet for mesh
 WIREGUARD_PORT = 51820
 INTERFACE_NAME = "homie0"
+BUNDLE_PORT = 51821  # TCP port for bundle transfer during invite/join
 
 
 @dataclass
@@ -436,7 +439,7 @@ class MeshManager:
 
         return invite
 
-    def create_bundle_for_joiner(self, joiner_pubkey: str) -> NetworkBundle:
+    def create_bundle_for_joiner(self, joiner_pubkey: str, my_endpoint: str = None) -> NetworkBundle:
         """Create a network bundle to send to a joining peer."""
         if not self.network or not self.identity:
             raise RuntimeError("Not part of a network")
@@ -444,12 +447,15 @@ class MeshManager:
         # Load all peers
         self.load_peers()
 
+        # Get our name from config
+        config = get_or_create_config()
+
         # Include ourselves in the peer list
         my_peer = Peer(
-            name=os.environ.get("USER", "homie"),  # TODO: get from config
+            name=config.name,
             public_key=self.identity.public_key,
             mesh_ip=self.network.my_mesh_ip,
-            endpoints=[],  # TODO: add our endpoint
+            endpoints=[my_endpoint] if my_endpoint else [],
         )
 
         all_peers = [my_peer] + list(self.peers.values())
@@ -457,7 +463,7 @@ class MeshManager:
         return NetworkBundle(
             version=1,
             network_name=self.network.name,
-            group_secret=self.network.group_secret,  # TODO: encrypt with joiner's key
+            group_secret=self.network.group_secret,
             peers=all_peers,
             invited_by=my_peer.name,
         )
@@ -645,3 +651,211 @@ class MeshManager:
             return False
         except Exception:
             return False
+
+    # =========================================================================
+    # Bundle Transfer Protocol
+    # =========================================================================
+
+    def start_bundle_server(
+        self,
+        expected_token: str,
+        joiner_pubkey: str,
+        timeout: int = 300,
+        on_status: Optional[callable] = None,
+    ) -> bool:
+        """Start a TCP server to send bundle to joiner.
+
+        Waits for an incoming connection from the joiner, verifies their auth
+        token, and sends them the full network bundle.
+
+        Args:
+            expected_token: The auth token from the invite code
+            joiner_pubkey: The joiner's public key (for verification)
+            timeout: How long to wait for joiner (seconds)
+            on_status: Optional callback for status updates
+
+        Returns:
+            True if bundle was sent successfully, False otherwise
+        """
+        def status(msg: str):
+            if on_status:
+                on_status(msg)
+
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            server_socket.bind(("0.0.0.0", BUNDLE_PORT))
+            server_socket.listen(1)
+            server_socket.settimeout(timeout)
+
+            status(f"Listening on port {BUNDLE_PORT}...")
+
+            # Wait for connection
+            try:
+                conn, addr = server_socket.accept()
+            except socket.timeout:
+                status("Timeout waiting for joiner")
+                return False
+
+            status(f"Connection from {addr[0]}")
+
+            try:
+                conn.settimeout(30)
+
+                # Receive bundle request
+                data = self._recv_json(conn)
+                if not data:
+                    status("Failed to receive request")
+                    return False
+
+                # Verify request
+                if data.get("type") != "bundle_request":
+                    status("Invalid request type")
+                    self._send_json(conn, {
+                        "type": "bundle_response",
+                        "success": False,
+                        "error": "Invalid request type",
+                    })
+                    return False
+
+                if data.get("auth_token") != expected_token:
+                    status("Invalid auth token")
+                    self._send_json(conn, {
+                        "type": "bundle_response",
+                        "success": False,
+                        "error": "Invalid auth token",
+                    })
+                    return False
+
+                if data.get("public_key") != joiner_pubkey:
+                    status("Public key mismatch")
+                    self._send_json(conn, {
+                        "type": "bundle_response",
+                        "success": False,
+                        "error": "Public key mismatch",
+                    })
+                    return False
+
+                # Create and send bundle
+                status("Sending bundle...")
+                bundle = self.create_bundle_for_joiner(joiner_pubkey)
+
+                self._send_json(conn, {
+                    "type": "bundle_response",
+                    "success": True,
+                    "bundle": bundle.to_dict(),
+                })
+
+                status("Bundle sent successfully")
+                return True
+
+            finally:
+                conn.close()
+
+        except Exception as e:
+            status(f"Error: {e}")
+            return False
+        finally:
+            server_socket.close()
+
+    def fetch_bundle_from_inviter(
+        self,
+        invite: "InviteCode",
+        my_pubkey: str,
+        timeout: int = 30,
+    ) -> "NetworkBundle":
+        """Connect to inviter and fetch the network bundle.
+
+        Args:
+            invite: The decoded invite code
+            my_pubkey: Our public key to send to inviter
+            timeout: Connection timeout in seconds
+
+        Returns:
+            The network bundle from the inviter
+
+        Raises:
+            ConnectionError: If can't reach inviter
+            ValueError: If auth fails or invalid response
+        """
+        # Parse endpoint (ip:port format for WireGuard, but we use BUNDLE_PORT)
+        endpoint = invite.inviter_endpoint
+        if ":" in endpoint:
+            host = endpoint.split(":")[0]
+        else:
+            host = endpoint
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+
+        try:
+            sock.connect((host, BUNDLE_PORT))
+
+            # Send bundle request
+            self._send_json(sock, {
+                "type": "bundle_request",
+                "auth_token": invite.auth_token,
+                "public_key": my_pubkey,
+            })
+
+            # Receive response
+            response = self._recv_json(sock)
+            if not response:
+                raise ConnectionError("No response from inviter")
+
+            if response.get("type") != "bundle_response":
+                raise ValueError(f"Invalid response type: {response.get('type')}")
+
+            if not response.get("success"):
+                error = response.get("error", "Unknown error")
+                raise ValueError(f"Inviter rejected request: {error}")
+
+            bundle_data = response.get("bundle")
+            if not bundle_data:
+                raise ValueError("No bundle in response")
+
+            return NetworkBundle.from_dict(bundle_data)
+
+        except socket.timeout:
+            raise ConnectionError("Connection timed out - is the inviter running 'homie network invite'?")
+        except socket.error as e:
+            raise ConnectionError(f"Could not connect to inviter: {e}")
+        finally:
+            sock.close()
+
+    def _send_json(self, sock: socket.socket, data: dict) -> None:
+        """Send JSON data over socket with length prefix."""
+        json_bytes = json.dumps(data).encode("utf-8")
+        length = len(json_bytes)
+        # Send 4-byte length prefix (big endian)
+        sock.sendall(length.to_bytes(4, "big"))
+        sock.sendall(json_bytes)
+
+    def _recv_json(self, sock: socket.socket) -> Optional[dict]:
+        """Receive JSON data from socket with length prefix."""
+        # Receive 4-byte length prefix
+        length_bytes = self._recv_exact(sock, 4)
+        if not length_bytes:
+            return None
+
+        length = int.from_bytes(length_bytes, "big")
+        if length > 10 * 1024 * 1024:  # 10 MB max
+            return None
+
+        # Receive JSON data
+        json_bytes = self._recv_exact(sock, length)
+        if not json_bytes:
+            return None
+
+        return json.loads(json_bytes.decode("utf-8"))
+
+    def _recv_exact(self, sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes from socket."""
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data

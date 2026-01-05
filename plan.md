@@ -1,411 +1,370 @@
-# Homie Compute
+# Homie Compute - WireGuard Mesh Implementation Plan
 
-A peer-to-peer distributed compute system for friends on the same local network.
+## Current State
 
-## The Idea
+Homie Compute is a P2P distributed compute CLI. The **local network** functionality is complete:
+- UDP discovery, TCP job execution, Docker isolation, streaming output
+- ~4,700 lines of Python across 11 modules
 
-You and your friends are on the same wifi. Each person has a laptop/desktop with varying specs. Someone has a beefy GPU, someone else has tons of RAM, whatever. When you need to run something heavy, why not use your homies' idle machines?
-
-No cloud, no servers, no accounts. Just a CLI tool and your local network.
-
----
-
-## How It Works
-
-```
-┌─────────────┐     UDP broadcast      ┌─────────────┐
-│   raj's     │ ◄──────────────────►   │   mike's    │
-│   machine   │      "i'm alive"       │   machine   │
-└─────────────┘                        └─────────────┘
-       ▲                                      ▲
-       │           UDP broadcast              │
-       └──────────────► ◄─────────────────────┘
-                        │
-                        ▼
-                 ┌─────────────┐
-                 │   your      │
-                 │   machine   │
-                 └─────────────┘
-```
-
-1. Everyone runs `homie up` — starts a daemon
-2. Daemons broadcast their existence + stats on the LAN via UDP
-3. When you want to run something, your CLI finds available peers
-4. Your machine sends code to a peer over TCP
-5. Peer executes, streams results back
+The **remote networking** has two approaches:
+1. **Tailscale** - Works today (manual IP exchange via `homie add`)
+2. **Native WireGuard Mesh** - Partially implemented, needs completion
 
 ---
 
-## Core Components
+## WireGuard Mesh: What's Done vs TODO
 
-### 1. Discovery Service
-**Purpose:** Find other peers on the network
+### Done
 
-- UDP broadcast on port `5555` (configurable)
-- Every 2 seconds, broadcast a heartbeat:
-  ```json
-  {
-    "name": "raj",
-    "ip": "192.168.1.42",
-    "port": 5556,
-    "ram_free_gb": 8.2,
-    "cpu_percent_idle": 73,
-    "gpu": "rtx3080",
-    "gpu_mem_free_gb": 6.1,
-    "status": "idle",
-    "timestamp": 1701234567
-  }
-  ```
-- Listen for other broadcasts, maintain a peer list
-- Peer is "dead" if no heartbeat for 10 seconds
+| Component | Location | Status |
+|-----------|----------|--------|
+| Data structures (Identity, Peer, Network, InviteCode, NetworkBundle) | `mesh.py:35-289` | Complete |
+| Key generation (wg command + Python X25519 fallback) | `mesh.py:43-101` | Complete |
+| Invite code encode/decode (~50 chars) | `mesh.py:174-251` | Complete |
+| MeshManager persistence (identity, network, peers) | `mesh.py:291-507` | Complete |
+| WireGuard config generation | `mesh.py:513-548` | Complete |
+| Tunnel up/down/status | `mesh.py:550-635` | Complete |
+| CLI: `homie network create/invite/join/status/leave/up/down` | `cli.py:853-1227` | Partial |
+| Integration with `homie up --mesh` | `cli.py:127-211` | Complete |
 
-### 2. Worker Daemon
-**Purpose:** Receive and execute jobs from peers
+### TODO - Critical Path
 
-- TCP server on port `5556` (configurable)
-- Accepts connections from other peers
-- Receives a job payload:
-  ```json
-  {
-    "job_id": "abc123",
-    "type": "script",
-    "filename": "train.py",
-    "code": "...base64 encoded...",
-    "args": ["--epochs", "10"],
-    "files": {
-      "data.csv": "...base64 encoded..."
-    }
-  }
-  ```
-- Executes in isolated temp directory
-- Streams stdout/stderr back over the TCP connection
-- Sends back result files when done
+| Component | Priority | Complexity | Description |
+|-----------|----------|------------|-------------|
+| Bundle transfer protocol | P0 | Medium | TCP server/client for sending NetworkBundle over WireGuard |
+| Inviter listener | P0 | Medium | Wait for joiner connection, verify auth token, send bundle |
+| Joiner connector | P0 | Medium | Connect to inviter, receive bundle, import peers |
+| Group secret transfer | P0 | Low | Currently "pending" - joiner can't authenticate jobs |
 
-### 3. Job Client
-**Purpose:** Send jobs to peers
+### TODO - Nice to Have
 
-- Connect to peer's TCP port
-- Serialize and send the job
-- Stream output to local terminal
-- Receive result files
-
-### 4. CLI Interface
-**Purpose:** Human-friendly commands
-
-```bash
-homie up                    # start daemon (discovery + worker)
-homie down                  # stop daemon
-homie peers                 # list all peers and their resources
-homie run script.py         # run on best available peer
-homie run -n raj script.py  # run on specific peer
-homie run -f data.csv script.py  # include additional files
-homie ps                    # list running jobs
-homie kill <job_id>         # kill a job
-```
-
-### 5. Job Serialization
-**Purpose:** Package code and data for transfer
-
-- For simple scripts: just send the .py file
-- For projects: tar the directory
-- For data: include specified files
-- Everything base64 encoded in JSON for simplicity
+| Component | Priority | Complexity | Description |
+|-----------|----------|------------|-------------|
+| Gossip protocol | P1 | High | Announce new peers to existing peers |
+| External endpoint detection | P2 | Medium | STUN-like discovery for public IP |
+| NAT relay | P2 | High | Route through reachable peer when direct fails |
+| Bundle encryption | P3 | Low | Encrypt group_secret with joiner's public key |
 
 ---
 
-## Directory Structure
+## The Problem Right Now
+
+When Bob tries to join Alice's network:
 
 ```
-homie/
-├── homie/
-│   ├── __init__.py
-│   ├── cli.py              # click/argparse CLI entrypoint
-│   ├── discovery.py        # UDP broadcast and peer tracking
-│   ├── worker.py           # TCP server, job execution
-│   ├── client.py           # TCP client, job submission
-│   ├── jobs.py             # job serialization/deserialization
-│   ├── config.py           # configuration handling
-│   └── utils.py            # resource monitoring (ram, cpu, gpu)
-├── setup.py
-├── requirements.txt
-└── README.md
+1. Alice: homie network create my-crew     ✅ Works
+2. Bob:   homie network join               ✅ Gets public key
+3. Alice: homie network invite             ✅ Creates invite code
+4. Bob:   homie network join <code>        ❌ BROKEN
+   - Saves Alice as single peer
+   - group_secret = "pending"
+   - Doesn't receive other peers
+5. Both:  homie up --mesh                  ✅ Tunnel comes up
+6. Bob:   homie run script.py              ❌ Auth fails (wrong group_secret)
 ```
 
 ---
 
-## Task Breakdown (5 People × 2 Hours)
+## Implementation Plan
 
-### Person 1: Discovery (`discovery.py`)
-**Time:** ~2 hours
+### Phase 1: Bundle Transfer Protocol (P0)
 
-Build the peer discovery system.
+**Goal:** When joiner runs `homie network join <code>`, they connect to inviter and receive the full bundle.
 
-**Tasks:**
-- [ ] UDP socket setup (broadcast + listen)
-- [ ] Heartbeat message format
-- [ ] Background thread for broadcasting every 2 seconds
-- [ ] Background thread for listening
-- [ ] PeerList class that tracks live peers
-- [ ] Auto-remove peers after 10s timeout
+#### 1.1 Add Bundle Server to MeshManager
 
-**Interface:**
+**File:** `homie/mesh.py`
+
+Add a simple TCP server that:
+- Listens on a port (e.g., 51821) for incoming bundle requests
+- Verifies the auth token from the invite code
+- Sends the NetworkBundle as JSON over the connection
+
 ```python
-class Discovery:
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def get_peers(self) -> list[Peer]: ...
-    def get_peer(self, name: str) -> Peer | None: ...
+# Add to MeshManager class
+
+BUNDLE_PORT = 51821
+
+def start_bundle_server(self, expected_token: str, timeout: int = 300) -> Optional[NetworkBundle]:
+    """Start a TCP server to send bundle to joiner.
+
+    Args:
+        expected_token: The auth token from the invite code
+        timeout: How long to wait for joiner (seconds)
+
+    Returns:
+        The bundle that was sent, or None if timeout/error
+    """
+    # Create TCP socket
+    # Listen on 0.0.0.0:BUNDLE_PORT
+    # Accept one connection
+    # Receive auth token, verify it matches expected_token
+    # Send NetworkBundle as JSON
+    # Close connection
+    pass
+
+def fetch_bundle_from_inviter(self, invite: InviteCode) -> NetworkBundle:
+    """Connect to inviter and fetch the network bundle.
+
+    Args:
+        invite: The decoded invite code
+
+    Returns:
+        The network bundle from the inviter
+
+    Raises:
+        ConnectionError: If can't reach inviter
+        AuthError: If auth token rejected
+    """
+    # Parse endpoint from invite (ip:wireguard_port)
+    # Connect to inviter's bundle port (ip:BUNDLE_PORT)
+    # Send auth token
+    # Receive NetworkBundle JSON
+    # Parse and return
+    pass
 ```
 
-**Test it:**
-```bash
-# terminal 1
-python -c "from homie.discovery import Discovery; d = Discovery('alice'); d.start(); input()"
+#### 1.2 Update CLI Invite Command
 
-# terminal 2
-python -c "from homie.discovery import Discovery; d = Discovery('bob'); d.start(); import time; time.sleep(5); print(d.get_peers())"
-```
+**File:** `homie/cli.py` (around line 903)
 
----
-
-### Person 2: Worker Daemon (`worker.py`)
-**Time:** ~2 hours
-
-Build the job execution server.
-
-**Tasks:**
-- [ ] TCP server using asyncio or threading
-- [ ] Accept incoming connections
-- [ ] Receive job payload (JSON)
-- [ ] Create temp directory for job
-- [ ] Write code/files to temp directory
-- [ ] Execute via subprocess
-- [ ] Stream stdout/stderr back over socket
-- [ ] Send back result files
-- [ ] Cleanup temp directory
-
-**Interface:**
 ```python
-class Worker:
-    def __init__(self, port: int = 5556): ...
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def get_running_jobs(self) -> list[Job]: ...
-    def kill_job(self, job_id: str) -> bool: ...
+@network.command("invite")
+def network_invite():
+    # ... existing code to create invite ...
+
+    console.print(f"Waiting for [cyan]{joiner_name}[/] to connect...")
+    console.print("[dim]Press Ctrl+C to cancel[/]")
+
+    # NEW: Start bundle server and wait
+    try:
+        bundle = mesh.create_bundle_for_joiner(joiner_pubkey)
+        result = mesh.start_bundle_server(invite.auth_token, timeout=300)
+        if result:
+            console.print(f"[green]✓[/] Bundle sent to {joiner_name}")
+            # Regenerate WireGuard config with new peer
+            mesh.generate_wireguard_config()
+        else:
+            console.print("[yellow]Timeout waiting for joiner[/]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled. Invite code still valid.[/]")
 ```
 
-**Message protocol (simple newline-delimited JSON):**
-```
---> {"type": "job", "job_id": "abc", "filename": "test.py", "code": "cHJpbnQoJ2hpJyk=", ...}
-<-- {"type": "stdout", "data": "hi\n"}
-<-- {"type": "done", "exit_code": 0, "files": {...}}
-```
+#### 1.3 Update CLI Join Command
 
----
+**File:** `homie/cli.py` (around line 977)
 
-### Person 3: Job Client (`client.py`)
-**Time:** ~2 hours
-
-Build the client that sends jobs to workers.
-
-**Tasks:**
-- [ ] TCP client connection
-- [ ] Send job payload
-- [ ] Receive and print streamed stdout/stderr
-- [ ] Receive result files, write to local disk
-- [ ] Handle connection errors gracefully
-- [ ] Timeout handling
-
-**Interface:**
 ```python
-class Client:
-    def run_job(
-        self,
-        peer: Peer,
-        script_path: str,
-        args: list[str] = [],
-        files: list[str] = []
-    ) -> JobResult: ...
+@network.command("join")
+@click.argument("invite_code", required=False)
+def network_join(invite_code: str):
+    # ... existing code to parse invite ...
+
+    console.print("Connecting to inviter...")
+
+    # NEW: Fetch bundle from inviter
+    try:
+        bundle = mesh.fetch_bundle_from_inviter(invite)
+        mesh.join_network(invite, bundle)
+        console.print(f"[green]✓[/] Joined network: {bundle.network_name}")
+        console.print(f"[dim]Received {len(bundle.peers)} peers[/]")
+    except ConnectionError as e:
+        console.print(f"[red]Could not reach inviter: {e}[/]")
+        console.print("[dim]Make sure they're running 'homie network invite'[/]")
+        sys.exit(1)
+```
+
+#### 1.4 Wire Protocol
+
+Simple JSON over TCP:
+
+```
+Joiner -> Inviter:
+{
+  "type": "bundle_request",
+  "auth_token": "xK7mQ9...",
+  "public_key": "Yj7KLm2x..."
+}
+
+Inviter -> Joiner:
+{
+  "type": "bundle_response",
+  "success": true,
+  "bundle": { ... NetworkBundle ... }
+}
 ```
 
 ---
 
-### Person 4: CLI (`cli.py`)
-**Time:** ~2 hours
+### Phase 2: Testing & Edge Cases
 
-Build the command-line interface.
+#### 2.1 Test Scenarios
 
-**Tasks:**
-- [ ] Use `click` or `argparse`
-- [ ] `homie up` — start daemon in background (or foreground with flag)
-- [ ] `homie down` — stop daemon
-- [ ] `homie peers` — pretty print peer list with resources
-- [ ] `homie run` — submit a job, stream output
-- [ ] `homie ps` — show running jobs
-- [ ] `homie kill` — kill a job
-- [ ] Config file support (~/.homie/config.yaml)
+1. **Happy path:** Alice invites, Bob joins, both `homie up --mesh`, Bob runs job on Alice
+2. **Inviter offline:** Bob tries to join but Alice isn't running invite command
+3. **Wrong auth token:** Malicious actor tries to get bundle with guessed token
+4. **Timeout:** Inviter waits 5 minutes, no one joins
+5. **Multiple peers:** Alice has 3 peers, invites Bob, Bob gets all 4 peers in bundle
 
-**Example output:**
-```
-$ homie peers
+#### 2.2 Error Handling
 
-NAME     IP              CPU     RAM      GPU          STATUS
-────────────────────────────────────────────────────────────
-raj      192.168.1.42    73%     8.2 GB   rtx3080      idle
-mike     192.168.1.43    12%     16.1 GB  none         idle
-sarah    192.168.1.44    91%     2.1 GB   rtx4090      busy
-
-$ homie run train.py --epochs 10
-
-→ sending to raj (best available)
-→ job started: abc123
-
-[raj] loading data...
-[raj] epoch 1/10 loss=0.45
-[raj] epoch 2/10 loss=0.32
-...
-[raj] done, saved model.pt
-
-→ job complete, downloading results...
-→ saved: ./results/model.pt
-```
+- Connection refused -> "Inviter not ready. Ask them to run 'homie network invite'"
+- Auth token mismatch -> "Invalid invite code"
+- Timeout -> "Inviter didn't respond in time"
+- Malformed bundle -> "Received invalid data from inviter"
 
 ---
 
-### Person 5: Utils + Jobs (`utils.py`, `jobs.py`)
-**Time:** ~2 hours
+### Phase 3: Gossip Protocol (P1)
 
-Build resource monitoring and job serialization.
+**Goal:** When a new peer joins, announce them to all existing peers.
 
-**Tasks for utils.py:**
-- [ ] Get free RAM (cross-platform)
-- [ ] Get CPU idle percentage
-- [ ] Detect GPU (nvidia-smi parsing or pynvml)
-- [ ] Get GPU memory free
-- [ ] Get hostname
+#### 3.1 Peer Announcement Message
 
-**Tasks for jobs.py:**
-- [ ] Job dataclass
-- [ ] Serialize job to JSON (base64 encode files)
-- [ ] Deserialize JSON to job
-- [ ] Package a script file
-- [ ] Package a directory (tar + base64)
-- [ ] Unpack job to temp directory
-
-**Interface:**
 ```python
-# utils.py
-def get_system_stats() -> SystemStats: ...
-
-# jobs.py
 @dataclass
-class Job:
-    job_id: str
-    filename: str
-    code: bytes
-    args: list[str]
-    files: dict[str, bytes]
-
-def serialize_job(job: Job) -> str: ...  # JSON string
-def deserialize_job(data: str) -> Job: ...
-def package_script(path: str, extra_files: list[str] = []) -> Job: ...
+class PeerAnnouncement:
+    """Announce a new peer to the network."""
+    type: str = "peer_announce"
+    peer: Peer
+    announced_by: str  # Name of peer making announcement
+    signature: str     # HMAC signature using group_secret
 ```
+
+#### 3.2 Announcement Flow
+
+1. When inviter sends bundle to joiner successfully:
+   - Create PeerAnnouncement for the new joiner
+   - Send to all known peers over WireGuard mesh
+
+2. When a peer receives PeerAnnouncement:
+   - Verify signature
+   - Add peer to local peer list
+   - Regenerate WireGuard config
+   - Optionally restart tunnel to apply changes
+
+#### 3.3 Implementation Location
+
+**File:** `homie/mesh.py`
+
+```python
+def announce_peer(self, peer: Peer) -> None:
+    """Announce a new peer to all known peers."""
+    pass
+
+def handle_peer_announcement(self, announcement: PeerAnnouncement) -> None:
+    """Handle incoming peer announcement."""
+    pass
+```
+
+**File:** `homie/cli.py` - Add announcement after successful invite
 
 ---
 
-## Integration Plan
+### Phase 4: Robustness (P2)
 
-**Hour 1:** Everyone builds their component independently
+#### 4.1 External Endpoint Detection
 
-**Hour 1.5:** Start integrating
-- Person 1 + 2: Discovery + Worker daemon combined
-- Person 3 + 4: Client + CLI combined
-- Person 5: Provides utils to everyone
+Use STUN-like protocol to discover public IP:
 
-**Hour 2:** Full integration + testing
-- Wire everything together
-- Test with real jobs across machines
-- Fix bugs
+```python
+def get_external_endpoint(self) -> Optional[str]:
+    """Discover our external IP:port using STUN."""
+    # Try common STUN servers
+    # stun.l.google.com:19302
+    # stun.cloudflare.com:3478
+    pass
+```
+
+#### 4.2 NAT Relay
+
+If peer A can't reach peer C directly, but both can reach peer B:
+- Route A->C traffic through B
+- Requires B to act as WireGuard relay
+- Complex - defer to P2
+
+---
+
+## File Changes Summary
+
+| File | Changes |
+|------|---------|
+| `homie/mesh.py` | Add `start_bundle_server()`, `fetch_bundle_from_inviter()`, `announce_peer()` |
+| `homie/cli.py` | Update `network_invite` and `network_join` commands |
+| `homie/discovery.py` | Minor: ensure mesh IPs work with direct peers |
+
+---
+
+## Testing Checklist
+
+### Local Testing (Same Machine)
+
+```bash
+# Terminal 1: Create network
+homie network create test-net
+homie network invite
+# Enter a test public key, get invite code
+
+# Terminal 2: Join network
+homie network join
+# Get public key, give to terminal 1
+homie network join <invite_code>
+
+# Verify
+homie network status  # Both terminals should show each other
+```
+
+### Remote Testing (Two Machines)
+
+```bash
+# Machine A (inviter)
+homie network create my-crew
+homie network invite
+# Wait for machine B
+
+# Machine B (joiner)
+homie network join
+# Share public key with A
+homie network join <invite_code_from_A>
+
+# Both machines
+homie up --mesh
+homie peers  # Should see each other
+
+# Machine B
+echo "print('hello from mesh')" > test.py
+homie run test.py  # Should run on Machine A
+```
 
 ---
 
 ## Dependencies
 
-```
-# requirements.txt
-click>=8.0
-psutil>=5.9
-pynvml>=11.0  # optional, for nvidia gpu detection
-```
+No new dependencies required. Uses:
+- `socket` (stdlib) - TCP server/client
+- `json` (stdlib) - Bundle serialization
+- `threading` (stdlib) - Server timeout handling
 
 ---
 
-## Stretch Goals (If Time Permits)
+## Timeline Estimate
 
-- [ ] **Job queue** — if peer is busy, queue the job
-- [ ] **Karma system** — track compute contributed vs consumed
-- [ ] **File sync** — only send files that changed
-- [ ] **Scatter jobs** — split data across multiple peers
-- [ ] **GPU selection** — `homie run --gpu train.py`
-- [ ] **Live stats** — `homie top` shows real-time cluster usage
-- [ ] **Job resume** — checkpoint and resume if connection drops
+| Phase | Effort | Description |
+|-------|--------|-------------|
+| Phase 1 | 2-3 hours | Bundle transfer - makes join actually work |
+| Phase 2 | 1 hour | Testing and error handling |
+| Phase 3 | 2-3 hours | Gossip protocol - multi-peer networks |
+| Phase 4 | 4+ hours | NAT traversal - complex networking |
 
----
-
-## Security Considerations
-
-This is a **trusted friends** system. There's no auth, no sandboxing. Anyone on your network could:
-- See your broadcasts
-- Connect to your worker
-- Execute arbitrary code on your machine
-
-**Only run this on networks you trust with people you trust.**
-
-Future improvements could add:
-- Pre-shared key authentication
-- Code signing
-- Container/sandbox execution
+**Recommended order:** Phase 1 -> Phase 2 -> Test with real users -> Phase 3 -> Phase 4
 
 ---
 
-## Example Session
+## Quick Start: What to Implement First
 
-```bash
-# raj's machine
-$ homie up
-daemon started, broadcasting as "raj"
-listening for jobs on :5556
+1. **`mesh.py:start_bundle_server()`** - 50 lines, TCP server that sends bundle
+2. **`mesh.py:fetch_bundle_from_inviter()`** - 40 lines, TCP client that receives bundle
+3. **`cli.py:network_invite`** - 20 lines, call bundle server after creating invite
+4. **`cli.py:network_join`** - 20 lines, call fetch_bundle after parsing invite
 
-# mike's machine  
-$ homie up
-daemon started, broadcasting as "mike"
-listening for jobs on :5556
-
-# your machine
-$ homie up
-daemon started, broadcasting as "you"
-listening for jobs on :5556
-
-$ homie peers
-raj   192.168.1.42  idle   8GB   rtx3080
-mike  192.168.1.43  idle   16GB  none
-
-$ homie run train.py
-→ running on raj
-[raj] training started...
-[raj] epoch 1 done
-[raj] epoch 2 done
-[raj] saved model.pt
-→ done, fetched model.pt
-
-$ ls
-train.py  model.pt
-```
-
----
-
-## Let's Build It
-
-Everyone clone the repo, pick your component, and let's get it done. Sync up at the hour mark to start integrating.
-
-Questions? Ping in the group chat. Ship it. 🚀
+Total: ~130 lines of new code to make join work end-to-end.

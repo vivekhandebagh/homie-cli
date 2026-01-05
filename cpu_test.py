@@ -69,8 +69,3 @@ print()
 print("=" * 50)
 print("CPU TEST COMPLETE!")
 print("=" * 50)
-
-i = 0
-while True:
-    i += 1
-    print(f"{i}")

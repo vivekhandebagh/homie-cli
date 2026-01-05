@@ -966,12 +966,36 @@ def network_invite():
     console.print()
     console.print(f"Waiting for [cyan]{joiner_name}[/] to connect...")
     console.print("[dim]Press Ctrl+C to cancel (invite will still work later)[/]")
-
-    # TODO: Start listening for the joiner's connection
-    # For now, just note that the invite was created
     console.print()
-    console.print("[yellow]Note: Auto-connect not yet implemented.[/]")
-    console.print(f"[yellow]Peer '{joiner_name}' has been pre-registered.[/]")
+
+    # Start bundle server and wait for joiner
+    def on_status(msg: str):
+        console.print(f"[dim]{msg}[/]")
+
+    try:
+        success = mesh.start_bundle_server(
+            expected_token=invite.auth_token,
+            joiner_pubkey=joiner_pubkey,
+            timeout=300,  # 5 minutes
+            on_status=on_status,
+        )
+
+        if success:
+            console.print()
+            console.print(f"[green]✓[/] Bundle sent to [cyan]{joiner_name}[/]")
+            console.print()
+            # Regenerate WireGuard config with new peer
+            mesh.generate_wireguard_config()
+            console.print("[dim]WireGuard config updated. Run 'homie up --mesh' to connect.[/]")
+        else:
+            console.print()
+            console.print("[yellow]Timeout waiting for joiner.[/]")
+            console.print(f"[dim]Peer '{joiner_name}' is pre-registered. They can still join later.[/]")
+
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[dim]Cancelled. Invite code is still valid.[/]")
+        console.print(f"[dim]Peer '{joiner_name}' is pre-registered.[/]")
 
 
 @network.command("join")
@@ -1034,42 +1058,44 @@ def network_join(invite_code: str):
     console.print()
     console.print("Connecting to inviter...")
 
-    # TODO: Actually connect via WireGuard and fetch the bundle
-    # For now, create a minimal network config
-    console.print()
-    console.print("[yellow]Note: Full WireGuard connection not yet implemented.[/]")
-    console.print("[yellow]Creating local network config with invite info...[/]")
+    # Fetch bundle from inviter
+    try:
+        bundle = mesh.fetch_bundle_from_inviter(invite, mesh.identity.public_key)
+    except ConnectionError as e:
+        console.print()
+        console.print(f"[red]Could not connect to inviter:[/] {e}")
+        console.print()
+        console.print("[dim]Make sure the inviter is running 'homie network invite'[/]")
+        console.print("[dim]and that you can reach their IP address.[/]")
+        sys.exit(1)
+    except ValueError as e:
+        console.print()
+        console.print(f"[red]Failed to join: {e}[/]")
+        sys.exit(1)
 
-    # Create network from invite (without full bundle for now)
-    from .mesh import Network, Peer
+    console.print("[green]✓[/] Received bundle from inviter")
+    console.print(f"[dim]  Network: {bundle.network_name}[/]")
+    console.print(f"[dim]  Peers: {len(bundle.peers)}[/]")
 
-    network = Network(
-        name=invite.network_name,
-        group_secret="pending",  # Will be received in bundle
-        my_mesh_ip=invite.assigned_ip,
-        next_ip=100,  # Will be synced from bundle
-    )
-    mesh.save_network(network)
+    # Join the network with the bundle
+    mesh.join_network(invite, bundle)
 
-    # Save inviter as a peer
-    inviter = Peer(
-        name="inviter",  # Will be updated from bundle
-        public_key=invite.inviter_pubkey,
-        mesh_ip="10.100.0.1",  # Assumed inviter is .1 or from bundle
-        endpoints=[invite.inviter_endpoint],
-    )
-    mesh.save_peer(inviter)
+    # Generate WireGuard config
+    mesh.load_identity()
+    mesh.load_network()
+    mesh.load_peers()
+    mesh.generate_wireguard_config()
 
     console.print()
     console.print(Panel(
-        f"[bold green]Joined network: {invite.network_name}[/]\n\n"
+        f"[bold green]Joined network: {bundle.network_name}[/]\n\n"
         f"[dim]Your mesh IP:[/] {invite.assigned_ip}\n"
-        f"[dim]Inviter:[/] {invite.inviter_endpoint}",
+        f"[dim]Peers:[/] {len(bundle.peers)}",
         title="🌐 Welcome!",
         border_style="green",
     ))
     console.print()
-    console.print("Run [bold]homie network status[/] to see your network")
+    console.print("Run [bold]homie up --mesh[/] to connect to the network")
 
 
 @network.command("status")
