@@ -26,6 +26,8 @@ class Peer:
     gpu_name: Optional[str]
     gpu_memory_free_gb: Optional[float]
     status: str  # "idle" or "busy"
+    relay_available: bool = False  # Can this peer help with mesh invites?
+    public_endpoint: Optional[str] = None  # External endpoint if relay_available
     last_seen: float = field(default_factory=time.time)
 
     @property
@@ -44,6 +46,8 @@ class Peer:
             "gpu_name": self.gpu_name,
             "gpu_memory_free_gb": self.gpu_memory_free_gb,
             "status": self.status,
+            "relay_available": self.relay_available,
+            "public_endpoint": self.public_endpoint,
         }
 
 
@@ -67,10 +71,12 @@ class Discovery:
         config: HomieConfig,
         on_peer_joined: Optional[Callable[[Peer], None]] = None,
         on_peer_left: Optional[Callable[[Peer], None]] = None,
+        relay_service=None,  # Optional relay service to advertise
     ):
         self.config = config
         self.on_peer_joined = on_peer_joined
         self.on_peer_left = on_peer_left
+        self.relay_service = relay_service
 
         self._peers: dict[str, Peer] = {}
         self._direct_peers: list[str] = []  # List of IPs to send direct heartbeats to
@@ -208,6 +214,18 @@ class Discovery:
     def _build_heartbeat(self) -> dict:
         """Build heartbeat message."""
         stats = get_system_stats()
+
+        # Check if relay service is available
+        relay_available = False
+        public_endpoint = None
+        if self.relay_service and self.relay_service.is_running():
+            relay_available = True
+            # Try to get public endpoint
+            from . import stun
+            endpoint_info = stun.detect_public_endpoint()
+            if endpoint_info:
+                public_endpoint = f"{endpoint_info.ip}:{endpoint_info.port}"
+
         return {
             "name": self.config.name,
             "ip": get_local_ip(),
@@ -218,6 +236,8 @@ class Discovery:
             "gpu_name": stats.gpu_name,
             "gpu_memory_free_gb": round(stats.gpu_memory_free_gb, 2) if stats.gpu_memory_free_gb else None,
             "status": self._status,
+            "relay_available": relay_available,
+            "public_endpoint": public_endpoint,
             "timestamp": time.time(),
         }
 

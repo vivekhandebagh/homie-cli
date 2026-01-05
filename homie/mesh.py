@@ -181,13 +181,15 @@ class InviteCode:
     - Endpoint: IP:port
     - Auth token: 6 bytes = 8 chars base64
     - Assigned IP: just the last octet (assumes 10.100.0.X)
+    - Relay mesh IP: optional, indicates this is a relay invite
     """
 
     network_name: str
     inviter_pubkey: str       # Inviter's WireGuard public key
-    inviter_endpoint: str     # Inviter's external endpoint (ip:port)
+    inviter_endpoint: str     # Inviter's external endpoint (ip:port) OR relay's endpoint
     auth_token: str           # One-time auth token (8 chars)
     assigned_ip: str          # Mesh IP assigned to joiner
+    relay_mesh_ip: Optional[str] = None  # If set, this is a relay invite
 
     def encode(self) -> str:
         """Encode to a short string for sharing.
@@ -196,6 +198,7 @@ class InviteCode:
         - Truncate network name to 16 chars
         - Store only last octet of mesh IP
         - Short auth token (8 chars)
+        - Optional relay mesh IP last octet
         """
         # Truncate network name
         net_name = self.network_name[:16]
@@ -203,8 +206,13 @@ class InviteCode:
         # Extract last octet of IP (e.g., "10.100.0.5" -> "5")
         ip_octet = self.assigned_ip.split(".")[-1]
 
-        # Use pipe-delimited format
-        data = f"{net_name}|{self.inviter_pubkey}|{self.inviter_endpoint}|{self.auth_token}|{ip_octet}"
+        # Add relay IP if present
+        if self.relay_mesh_ip:
+            relay_octet = self.relay_mesh_ip.split(".")[-1]
+            data = f"{net_name}|{self.inviter_pubkey}|{self.inviter_endpoint}|{self.auth_token}|{ip_octet}|{relay_octet}"
+        else:
+            data = f"{net_name}|{self.inviter_pubkey}|{self.inviter_endpoint}|{self.auth_token}|{ip_octet}"
+
         encoded = base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
         return f"hm1_{encoded}"
 
@@ -223,12 +231,18 @@ class InviteCode:
         data = base64.urlsafe_b64decode(encoded).decode()
         parts = data.split("|")
 
-        if len(parts) != 5:
+        if len(parts) not in [5, 6]:
             raise ValueError("Invalid invite code format")
 
         # Reconstruct full mesh IP from last octet
         ip_octet = parts[4]
         full_ip = f"10.100.0.{ip_octet}"
+
+        # Check for relay mesh IP (6th part)
+        relay_mesh_ip = None
+        if len(parts) == 6:
+            relay_octet = parts[5]
+            relay_mesh_ip = f"10.100.0.{relay_octet}"
 
         return cls(
             network_name=parts[0],
@@ -236,6 +250,7 @@ class InviteCode:
             inviter_endpoint=parts[2],
             auth_token=parts[3],
             assigned_ip=full_ip,
+            relay_mesh_ip=relay_mesh_ip,
         )
 
     @classmethod
@@ -501,9 +516,161 @@ class MeshManager:
         self.peers = {}
 
     def get_external_endpoint(self) -> Optional[str]:
-        """Try to determine our external endpoint for WireGuard."""
-        # TODO: Implement STUN-like discovery or use configured value
-        # For now, return None (peers will need to specify manually)
+        """
+        Try to determine our external endpoint for WireGuard.
+
+        Uses STUN and other methods to auto-detect the best endpoint.
+        """
+        from . import stun
+
+        endpoint_info = stun.detect_public_endpoint(WIREGUARD_PORT)
+        if endpoint_info:
+            return f"{endpoint_info.ip}:{endpoint_info.port}"
+
+        return None
+
+    def get_best_endpoint(self) -> tuple[Optional[str], str]:
+        """
+        Detect the best endpoint using tiered fallback strategy.
+
+        Returns:
+            (endpoint, method) where method is one of:
+            - "lan": Same local network
+            - "stun": STUN-detected public IP
+            - "tailscale": Tailscale IP
+            - "relay": Must use mesh relay
+            - "manual": No automatic method available
+        """
+        from . import stun
+        from .utils import get_local_ip
+
+        # Tier 1: Check if on same LAN (would need joiner's IP - skip for now)
+        # This is checked in the CLI when we know both IPs
+
+        # Tier 2: Try STUN
+        endpoint_info = stun.detect_public_endpoint(WIREGUARD_PORT)
+        if endpoint_info:
+            if endpoint_info.method == "tailscale":
+                return (f"{endpoint_info.ip}:{endpoint_info.port}", "tailscale")
+            elif endpoint_info.reliability >= 70:
+                # Good enough for direct connection
+                return (f"{endpoint_info.ip}:{endpoint_info.port}", "stun")
+
+        # Tier 3: Check for relay peers
+        relay_peers = self.find_relay_peers()
+        if relay_peers:
+            return (None, "relay")  # Endpoint will be relay's endpoint
+
+        # Tier 4: No automatic method
+        return (None, "manual")
+
+    def find_relay_peers(self) -> list[Peer]:
+        """
+        Find peers in the mesh that can act as relays.
+
+        Returns list of peers with public endpoints, sorted by reliability.
+        """
+        self.load_peers()
+
+        relay_peers = []
+        for peer in self.peers.values():
+            # Peer must have endpoints configured
+            if peer.endpoints:
+                relay_peers.append(peer)
+
+        return relay_peers
+
+    def create_invite_via_relay(self, joiner_pubkey: str, joiner_name: str,
+                                relay_peer: Peer) -> InviteCode:
+        """
+        Create an invite that uses a relay peer for coordination.
+
+        Args:
+            joiner_pubkey: Joiner's WireGuard public key
+            joiner_name: Name for the joiner
+            relay_peer: Peer that will relay the invite
+
+        Returns:
+            InviteCode with relay information
+        """
+        if not self.network or not self.identity:
+            raise RuntimeError("Not part of a network")
+
+        assigned_ip = self.get_next_mesh_ip()
+
+        # Create invite with relay's endpoint
+        invite = InviteCode(
+            network_name=self.network.name,
+            inviter_pubkey=self.identity.public_key,
+            inviter_endpoint=relay_peer.endpoints[0],  # Relay's public endpoint
+            auth_token=secrets.token_urlsafe(6),
+            assigned_ip=assigned_ip,
+            relay_mesh_ip=relay_peer.mesh_ip  # Indicates this is a relay invite
+        )
+
+        # Pre-register the peer
+        peer = Peer(
+            name=joiner_name,
+            public_key=joiner_pubkey,
+            mesh_ip=assigned_ip,
+            endpoints=[],
+            invited_by=self.network.my_mesh_ip,
+        )
+        self.save_peer(peer)
+
+        return invite
+
+    def register_with_relay(self, relay_peer: Peer, invite: InviteCode):
+        """
+        Register an invite with a relay peer.
+
+        Sends HTTP request to relay peer's relay service to store the invite.
+        """
+        import requests
+
+        try:
+            response = requests.post(
+                f"http://{relay_peer.mesh_ip}:8080/register",
+                json={
+                    "token": invite.auth_token,
+                    "inviter_mesh_ip": self.network.my_mesh_ip,
+                    "inviter_pubkey": self.identity.public_key
+                },
+                timeout=5
+            )
+
+            if response.status_code != 201:
+                raise RuntimeError(f"Relay registration failed: {response.status_code}")
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to contact relay peer: {e}")
+
+    def lookup_via_relay(self, relay_mesh_ip: str, token: str) -> Optional[dict]:
+        """
+        Look up invite information via relay peer.
+
+        Args:
+            relay_mesh_ip: Mesh IP of the relay peer
+            token: Auth token from invite code
+
+        Returns:
+            Dict with inviter_mesh_ip and inviter_pubkey, or None if not found
+        """
+        import requests
+
+        try:
+            response = requests.get(
+                f"http://{relay_mesh_ip}:8080/lookup",
+                params={"token": token},
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+        except Exception:
+            pass
+
         return None
 
     # =========================================================================

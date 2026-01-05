@@ -125,6 +125,7 @@ def up(name: str, mesh: bool):
 
     # Handle mesh tunnel if requested
     mesh_manager = None
+    relay_service = None
     if mesh:
         mesh_manager = MeshManager()
 
@@ -158,6 +159,14 @@ def up(name: str, mesh: bool):
         console.print(f"[green]Mesh tunnel active:[/] {mesh_manager.network.my_mesh_ip}")
         console.print()
 
+        # Start relay service if we have good connectivity
+        from .relay_service import MeshRelayService
+        relay_service = MeshRelayService(mesh_manager)
+        if relay_service.can_relay():
+            relay_service.start()
+            console.print("[dim]Relay service enabled (helping others join)[/]")
+            console.print()
+
     ip = get_local_ip()
 
     # Create worker
@@ -181,6 +190,7 @@ def up(name: str, mesh: bool):
         config,
         on_peer_joined=on_peer_joined,
         on_peer_left=on_peer_left,
+        relay_service=relay_service,
     )
 
     # Add mesh peers to discovery's direct peer list
@@ -205,6 +215,9 @@ def up(name: str, mesh: bool):
         console.print("\n[dim]Shutting down...[/]")
         discovery.stop()
         worker.stop()
+
+        if relay_service:
+            relay_service.stop()
 
         if mesh_manager and mesh_manager.is_tunnel_up():
             console.print("[dim]Stopping mesh tunnel...[/]")
@@ -902,9 +915,9 @@ def network_create(name: str, secret: str):
 
 @network.command("invite")
 def network_invite():
-    """Invite a new peer to your network.
+    """Invite a new peer to your network using smart fallback strategy.
 
-    Your friend needs to run 'homie network join' first to get their public key.
+    Automatically tries: LAN → STUN → Relay → Manual
     """
     from rich.panel import Panel
 
@@ -918,6 +931,7 @@ def network_invite():
 
     mesh.load_identity()
     mesh.load_network()
+    mesh.load_peers()
 
     console.print()
     console.print(f"[bold]Adding a friend to '{mesh.network.name}'[/]")
@@ -938,18 +952,54 @@ def network_invite():
     # Get peer name
     joiner_name = click.prompt("Name for this peer")
 
-    # Get our endpoint
-    # TODO: auto-detect or use configured value
-    my_endpoint = click.prompt(
-        "Your external endpoint (IP:port)",
-        default=f"{get_local_ip()}:51820"
-    )
+    console.print()
+    console.print("[bold]Detecting best connection method...[/]")
 
-    # Create invite
-    try:
-        invite = mesh.create_invite(joiner_pubkey, joiner_name, my_endpoint)
-    except RuntimeError as e:
-        console.print(f"[red]{e}[/]")
+    # Smart endpoint detection
+    endpoint, method = mesh.get_best_endpoint()
+
+    if method == "tailscale":
+        console.print(f"[green]✓ Tailscale connection available[/]")
+        console.print(f"[dim]  Endpoint: {endpoint}[/]")
+        invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
+
+    elif method == "stun":
+        console.print(f"[green]✓ Direct connection available (via STUN)[/]")
+        console.print(f"[dim]  Public endpoint: {endpoint}[/]")
+        invite = mesh.create_invite(joiner_pubkey, joiner_name, endpoint)
+
+    elif method == "relay":
+        relay_peers = mesh.find_relay_peers()
+        if relay_peers:
+            relay_peer = relay_peers[0]
+            console.print(f"[yellow]⚠ No direct connection possible[/]")
+            console.print(f"[cyan]→ Using mesh relay: {relay_peer.name}[/]")
+            console.print(f"[dim]  Relay endpoint: {relay_peer.endpoints[0]}[/]")
+
+            invite = mesh.create_invite_via_relay(joiner_pubkey, joiner_name, relay_peer)
+
+            # Register with relay peer
+            try:
+                mesh.register_with_relay(relay_peer, invite)
+                console.print(f"[green]✓ Registered with relay peer[/]")
+            except RuntimeError as e:
+                console.print(f"[red]Failed to register with relay: {e}[/]")
+                console.print("[yellow]Invite code created but relay may not work[/]")
+        else:
+            method = "manual"  # Fall through to manual
+
+    if method == "manual":
+        console.print("[red]✗ No automatic connection method available[/]")
+        console.print()
+        console.print("Options:")
+        console.print("  1. [cyan]Install Tailscale[/] (recommended - easiest)")
+        console.print("     brew install tailscale && sudo tailscale up")
+        console.print()
+        console.print("  2. [cyan]Set up port forwarding[/] on your router")
+        console.print("     Forward UDP port 51820 to this machine")
+        console.print()
+        console.print("  3. [cyan]Wait until same LAN[/] as your friend")
+        console.print()
         sys.exit(1)
 
     invite_code = invite.encode()
@@ -963,15 +1013,7 @@ def network_invite():
     ))
     console.print()
     console.print(f"[dim]Assigned mesh IP: {invite.assigned_ip}[/]")
-    console.print()
-    console.print(f"Waiting for [cyan]{joiner_name}[/] to connect...")
-    console.print("[dim]Press Ctrl+C to cancel (invite will still work later)[/]")
-
-    # TODO: Start listening for the joiner's connection
-    # For now, just note that the invite was created
-    console.print()
-    console.print("[yellow]Note: Auto-connect not yet implemented.[/]")
-    console.print(f"[yellow]Peer '{joiner_name}' has been pre-registered.[/]")
+    console.print(f"[dim]Connection method: {method}[/]")
 
 
 @network.command("join")
@@ -1029,13 +1071,28 @@ def network_join(invite_code: str):
 
     console.print()
     console.print(f"[bold]Joining network: {invite.network_name}[/]")
-    console.print(f"[dim]Inviter endpoint: {invite.inviter_endpoint}[/]")
     console.print(f"[dim]Your assigned IP: {invite.assigned_ip}[/]")
-    console.print()
-    console.print("Connecting to inviter...")
 
-    # TODO: Actually connect via WireGuard and fetch the bundle
-    # For now, create a minimal network config
+    # Check if this is a relay invite
+    if invite.relay_mesh_ip:
+        console.print(f"[dim]Connection method: via relay[/]")
+        console.print(f"[dim]Relay endpoint: {invite.inviter_endpoint}[/]")
+        console.print()
+        console.print("Connecting to relay peer...")
+
+        # Look up inviter via relay
+        inviter_info = mesh.lookup_via_relay(invite.relay_mesh_ip, invite.auth_token)
+
+        if not inviter_info:
+            console.print("[red]Failed to lookup inviter via relay[/]")
+            console.print("[yellow]Invite may have expired or relay is offline[/]")
+            sys.exit(1)
+
+        console.print(f"[green]✓ Found inviter at {inviter_info['inviter_mesh_ip']}[/]")
+    else:
+        console.print(f"[dim]Connection method: direct[/]")
+        console.print(f"[dim]Inviter endpoint: {invite.inviter_endpoint}[/]")
+
     console.print()
     console.print("[yellow]Note: Full WireGuard connection not yet implemented.[/]")
     console.print("[yellow]Creating local network config with invite info...[/]")
@@ -1052,24 +1109,35 @@ def network_join(invite_code: str):
     mesh.save_network(network)
 
     # Save inviter as a peer
-    inviter = Peer(
-        name="inviter",  # Will be updated from bundle
-        public_key=invite.inviter_pubkey,
-        mesh_ip="10.100.0.1",  # Assumed inviter is .1 or from bundle
-        endpoints=[invite.inviter_endpoint],
-    )
+    if invite.relay_mesh_ip:
+        # Relay invite - save actual inviter info from lookup
+        inviter = Peer(
+            name="inviter",
+            public_key=invite.inviter_pubkey,
+            mesh_ip=inviter_info['inviter_mesh_ip'],
+            endpoints=[invite.inviter_endpoint],  # Relay's endpoint
+        )
+    else:
+        # Direct invite
+        inviter = Peer(
+            name="inviter",
+            public_key=invite.inviter_pubkey,
+            mesh_ip="10.100.0.1",  # Assumed
+            endpoints=[invite.inviter_endpoint],
+        )
     mesh.save_peer(inviter)
 
     console.print()
     console.print(Panel(
         f"[bold green]Joined network: {invite.network_name}[/]\n\n"
         f"[dim]Your mesh IP:[/] {invite.assigned_ip}\n"
-        f"[dim]Inviter:[/] {invite.inviter_endpoint}",
+        f"[dim]Connection:[/] {'via relay' if invite.relay_mesh_ip else 'direct'}",
         title="🌐 Welcome!",
         border_style="green",
     ))
     console.print()
-    console.print("Run [bold]homie network status[/] to see your network")
+    console.print("Run [bold]homie up --mesh[/] to connect to the network")
+    console.print("Run [bold]homie network status[/] to see network info")
 
 
 @network.command("status")
