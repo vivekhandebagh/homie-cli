@@ -35,11 +35,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_POST(self):
-        """Handle POST requests (register)."""
+        """Handle POST requests (register and bundle proxy)."""
         parsed = urlparse(self.path)
 
         if parsed.path == "/register":
             self._handle_register()
+        elif parsed.path == "/bundle/proxy":
+            self._handle_bundle_proxy()
         else:
             self.send_error(404, "Not Found")
 
@@ -117,6 +119,48 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(invite_info).encode())
+
+    def _handle_bundle_proxy(self):
+        """Proxy a bundle request from joiner to inviter."""
+        service: MeshRelayService = self.server.relay_service
+
+        # Read request body
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode()
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        # Validate required fields
+        if not all(k in data for k in ['auth_token', 'joiner_pubkey']):
+            self.send_error(400, "Missing required fields")
+            return
+
+        auth_token = data['auth_token']
+        joiner_pubkey = data['joiner_pubkey']
+
+        # Look up inviter from stored invite
+        invite_info = service.lookup_invite_for_proxy(auth_token)
+
+        if not invite_info:
+            self.send_error(404, "Invite not found or expired")
+            return
+
+        inviter_mesh_ip = invite_info['inviter_mesh_ip']
+
+        # Proxy request to inviter's bundle service
+        bundle_data = service.proxy_bundle_request(inviter_mesh_ip, auth_token, joiner_pubkey)
+
+        if bundle_data:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(bundle_data).encode())
+        else:
+            self.send_error(502, "Failed to fetch bundle from inviter")
 
 
 class MeshRelayService:
@@ -236,6 +280,109 @@ class MeshRelayService:
                 "inviter_mesh_ip": invite["inviter_mesh_ip"],
                 "inviter_pubkey": invite["inviter_pubkey"]
             }
+
+    def lookup_invite_for_proxy(self, token: str) -> Optional[dict]:
+        """
+        Look up an invite token for bundle proxy without deleting it.
+
+        Used by bundle proxy endpoint - doesn't delete the token since
+        we need to forward it to the inviter's bundle service.
+
+        Returns invite info if found and not expired, None otherwise.
+        """
+        with self._lock:
+            invite = self._invites.get(token)
+
+            if not invite:
+                print(f"[Relay] Proxy lookup failed: {token[:8]}... (not found)")
+                return None
+
+            # Check if expired
+            if time.time() > invite['expires_at']:
+                del self._invites[token]
+                print(f"[Relay] Proxy lookup failed: {token[:8]}... (expired)")
+                return None
+
+            print(f"[Relay] Proxy lookup success: {token[:8]}... → {invite['inviter_mesh_ip']}")
+
+            return {
+                "inviter_mesh_ip": invite["inviter_mesh_ip"],
+                "inviter_pubkey": invite["inviter_pubkey"]
+            }
+
+    def proxy_bundle_request(self, inviter_mesh_ip: str, auth_token: str,
+                             joiner_pubkey: str) -> Optional[dict]:
+        """
+        Proxy a bundle request to the inviter's Worker service.
+
+        Uses Worker protocol (TCP port 5556) with message type 'B'.
+
+        Args:
+            inviter_mesh_ip: Mesh IP of the inviter
+            auth_token: Auth token from invite
+            joiner_pubkey: Public key of the joiner
+
+        Returns:
+            Bundle data as dict if successful, None otherwise
+        """
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+
+        try:
+            print(f"[Relay] Proxying bundle request to {inviter_mesh_ip}")
+
+            # Connect to inviter's worker
+            sock.connect((inviter_mesh_ip, 5556))
+
+            # Send message type 'B' (Bundle request)
+            sock.sendall(b'B')
+
+            # Prepare payload
+            payload = json.dumps({
+                "auth_token": auth_token,
+                "joiner_pubkey": joiner_pubkey
+            }).encode()
+
+            # Send length-prefixed payload
+            sock.sendall(len(payload).to_bytes(4, "big"))
+            sock.sendall(payload)
+
+            # Receive response (1 byte: '1' = success, '0' = failure)
+            status = sock.recv(1)
+            if status != b'1':
+                print(f"[Relay] Proxy failed: inviter rejected auth")
+                return None
+
+            # Receive bundle (length-prefixed JSON)
+            length_bytes = self._recv_exactly(sock, 4)
+            if not length_bytes:
+                return None
+
+            length = int.from_bytes(length_bytes, "big")
+            bundle_data = self._recv_exactly(sock, length)
+            if not bundle_data:
+                return None
+
+            print(f"[Relay] Successfully proxied bundle from {inviter_mesh_ip}")
+            return json.loads(bundle_data.decode())
+
+        except Exception as e:
+            print(f"[Relay] Failed to proxy bundle request: {e}")
+            return None
+        finally:
+            sock.close()
+
+    def _recv_exactly(self, sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes from socket."""
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
 
     def _cleanup_loop(self):
         """Background thread that periodically removes expired invites."""

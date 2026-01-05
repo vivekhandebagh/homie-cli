@@ -31,11 +31,13 @@ class Worker:
         on_job_started: Optional[Callable[[Job], None]] = None,
         on_job_completed: Optional[Callable[[JobResult], None]] = None,
         on_status_changed: Optional[Callable[[str], None]] = None,
+        mesh_manager: Optional['MeshManager'] = None,
     ):
         self.config = config
         self.on_job_started = on_job_started
         self.on_job_completed = on_job_completed
         self.on_status_changed = on_status_changed
+        self.mesh_manager = mesh_manager  # For bundle/peer sync operations
 
         self._executor = ContainerExecutor(
             ContainerConfig(
@@ -125,6 +127,12 @@ class Worker:
             elif msg_type == b'L':
                 # List jobs request
                 self._handle_list_request(conn)
+            elif msg_type == b'B':
+                # Bundle request (mesh)
+                self._handle_bundle_request(conn)
+            elif msg_type == b'P':
+                # Peer announce (mesh)
+                self._handle_peer_announce(conn)
             else:
                 self._send_error(conn, f"Unknown message type: {msg_type}")
 
@@ -355,3 +363,92 @@ class Worker:
             with self._lock:
                 if not self._running_jobs and self.on_status_changed:
                     self.on_status_changed("idle")
+
+    def _handle_bundle_request(self, conn: socket.socket) -> None:
+        """Handle a bundle request from a joining peer (mesh)."""
+        # Receive bundle request payload (length-prefixed JSON)
+        length_bytes = self._recv_exactly(conn, 4)
+        if not length_bytes:
+            return
+        length = int.from_bytes(length_bytes, "big")
+
+        payload_data = self._recv_exactly(conn, length)
+        if not payload_data:
+            return
+
+        try:
+            payload = json.loads(payload_data.decode())
+            auth_token = payload["auth_token"]
+            joiner_pubkey = payload["joiner_pubkey"]
+
+            # Verify auth token against pending invites
+            if not self.mesh_manager:
+                conn.sendall(b'0')  # No mesh manager configured
+                return
+
+            # Load pending invites and verify
+            pending_invites = self.mesh_manager.load_pending_invites()
+            invite_info = pending_invites.get(auth_token)
+
+            if not invite_info:
+                conn.sendall(b'0')  # Token not found
+                return
+
+            # Check expiry
+            if time.time() > invite_info['expires_at']:
+                conn.sendall(b'0')  # Expired
+                return
+
+            # Check pubkey matches
+            if invite_info['joiner_pubkey'] != joiner_pubkey:
+                conn.sendall(b'0')  # Pubkey mismatch
+                return
+
+            # Create bundle
+            bundle = self.mesh_manager.create_bundle_for_joiner(joiner_pubkey)
+            bundle_json = bundle.to_json()
+
+            # Send success + bundle
+            conn.sendall(b'1')  # Success
+            bundle_data = bundle_json.encode()
+            conn.sendall(len(bundle_data).to_bytes(4, "big"))
+            conn.sendall(bundle_data)
+
+            print(f"[Worker] Sent bundle to joiner (pubkey: {joiner_pubkey[:12]}...)")
+
+        except Exception as e:
+            conn.sendall(b'0')  # Error
+            print(f"[Worker] Bundle request error: {e}")
+
+    def _handle_peer_announce(self, conn: socket.socket) -> None:
+        """Handle a peer announcement from a newly joined peer (mesh)."""
+        # Receive peer announcement payload (length-prefixed JSON)
+        length_bytes = self._recv_exactly(conn, 4)
+        if not length_bytes:
+            return
+        length = int.from_bytes(length_bytes, "big")
+
+        payload_data = self._recv_exactly(conn, length)
+        if not payload_data:
+            return
+
+        try:
+            payload = json.loads(payload_data.decode())
+
+            if not self.mesh_manager:
+                conn.sendall(b'0')  # No mesh manager configured
+                return
+
+            # Import Peer here to avoid circular import
+            from .mesh import Peer
+            peer = Peer.from_dict(payload)
+
+            # Save the new peer
+            self.mesh_manager.save_peer(peer)
+
+            conn.sendall(b'1')  # Success
+            print(f"[Worker] Registered new peer: {peer.name} ({peer.mesh_ip})")
+
+        except Exception as e:
+            conn.sendall(b'0')  # Error
+            print(f"[Worker] Peer announce error: {e}")

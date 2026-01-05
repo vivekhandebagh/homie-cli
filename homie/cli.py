@@ -165,12 +165,12 @@ def up(name: str, mesh: bool):
         if relay_service.can_relay():
             relay_service.start()
             console.print("[dim]Relay service enabled (helping others join)[/]")
-            console.print()
+        console.print()
 
     ip = get_local_ip()
 
-    # Create worker
-    worker = Worker(config)
+    # Create worker (with mesh_manager for bundle/peer sync if mesh enabled)
+    worker = Worker(config, mesh_manager=mesh_manager if mesh else None)
 
     # Check Docker availability
     docker_ok = worker.is_docker_available()
@@ -1113,10 +1113,9 @@ def network_join(invite_code: str):
         console.print(f"[dim]Inviter endpoint: {invite.inviter_endpoint}[/]")
 
     console.print()
-    console.print("[yellow]Note: Full WireGuard connection not yet implemented.[/]")
-    console.print("[yellow]Creating local network config with invite info...[/]")
+    console.print("[bold]Setting up local network configuration...[/]")
 
-    # Create network from invite (without full bundle for now)
+    # Create temporary network from invite (will be updated with real data from bundle)
     from .mesh import Network, Peer
 
     network = Network(
@@ -1127,36 +1126,121 @@ def network_join(invite_code: str):
     )
     mesh.save_network(network)
 
-    # Save inviter as a peer
+    # Save inviter as a peer for WireGuard connection
     if invite.relay_mesh_ip:
-        # Relay invite - save actual inviter info from lookup
+        # Relay invite - need both relay and inviter info
+        relay = Peer(
+            name="relay",
+            public_key=invite.inviter_pubkey,  # This is actually relay's pubkey in relay invite
+            mesh_ip=invite.relay_mesh_ip,
+            endpoints=[invite.inviter_endpoint],
+        )
+        mesh.save_peer(relay)
+
+        # Save actual inviter from lookup
         inviter = Peer(
             name="inviter",
-            public_key=invite.inviter_pubkey,
+            public_key=inviter_info['inviter_pubkey'],
             mesh_ip=inviter_info['inviter_mesh_ip'],
-            endpoints=[invite.inviter_endpoint],  # Relay's endpoint
+            endpoints=[],  # No direct endpoint
         )
+        mesh.save_peer(inviter)
+
     else:
         # Direct invite
         inviter = Peer(
             name="inviter",
             public_key=invite.inviter_pubkey,
-            mesh_ip="10.100.0.1",  # Assumed
+            mesh_ip="10.100.0.1",  # Assumed for now (will be corrected by bundle)
             endpoints=[invite.inviter_endpoint],
         )
-    mesh.save_peer(inviter)
+        mesh.save_peer(inviter)
 
+    console.print("[green]✓ Network configured[/]")
+    console.print()
+    console.print("[bold]Bringing up WireGuard tunnel...[/]")
+    console.print("[dim]You may be prompted for your password (sudo required)[/]")
+    console.print()
+
+    # Bring up WireGuard tunnel
+    try:
+        if not mesh.tunnel_up():
+            console.print("[red]Failed to bring up WireGuard tunnel[/]")
+            console.print("[dim]Check that wireguard-tools is installed[/]")
+            sys.exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    console.print(f"[green]✓ Tunnel active:[/] {invite.assigned_ip}")
+    console.print()
+    console.print("[bold]Fetching network bundle...[/]")
+
+    # Fetch bundle from inviter (direct or via relay)
+    bundle = None
+
+    if invite.relay_mesh_ip:
+        # Fetch via relay
+        console.print(f"[dim]Fetching via relay at {invite.relay_mesh_ip}...[/]")
+        bundle = mesh.fetch_bundle_via_relay(
+            invite.relay_mesh_ip,
+            invite.auth_token,
+            mesh.identity.public_key
+        )
+    else:
+        # Fetch directly from inviter
+        # Use the actual inviter mesh IP from bundle or assume .1 for bootstrap
+        inviter_mesh_ip = inviter_info.get('inviter_mesh_ip', '10.100.0.1') if invite.relay_mesh_ip else '10.100.0.1'
+        console.print(f"[dim]Fetching from inviter at {inviter_mesh_ip}...[/]")
+        bundle = mesh.fetch_bundle_from_peer(
+            inviter_mesh_ip,
+            invite.auth_token,
+            mesh.identity.public_key
+        )
+
+    if not bundle:
+        console.print("[red]Failed to fetch network bundle[/]")
+        console.print("[yellow]You joined the network but don't have complete peer info[/]")
+        console.print("[yellow]Try running 'homie network leave' and join again[/]")
+        sys.exit(1)
+
+    console.print(f"[green]✓ Received bundle:[/] {len(bundle.peers)} peers")
+    console.print()
+    console.print("[bold]Applying bundle and announcing to network...[/]")
+
+    # Apply bundle (updates group_secret and saves all peers)
+    mesh.apply_bundle(bundle)
+
+    # Get our config name for the peer announcement
+    config = get_or_create_config()
+
+    # Create our peer info to announce
+    my_peer = Peer(
+        name=config.name,
+        public_key=mesh.identity.public_key,
+        mesh_ip=invite.assigned_ip,
+        endpoints=[],  # We don't know our endpoint yet
+        invited_by=bundle.invited_by,
+    )
+
+    # Announce ourselves to all peers in the network
+    mesh.announce_peer_to_mesh(my_peer)
+
+    console.print("[green]✓ Successfully joined network![/]")
     console.print()
     console.print(Panel(
-        f"[bold green]Joined network: {invite.network_name}[/]\n\n"
+        f"[bold green]Welcome to {invite.network_name}![/]\n\n"
         f"[dim]Your mesh IP:[/] {invite.assigned_ip}\n"
+        f"[dim]Peers in network:[/] {len(bundle.peers)}\n"
         f"[dim]Connection:[/] {'via relay' if invite.relay_mesh_ip else 'direct'}",
-        title="🌐 Welcome!",
+        title="🌐 Network Joined",
         border_style="green",
     ))
     console.print()
-    console.print("Run [bold]homie up --mesh[/] to connect to the network")
-    console.print("Run [bold]homie network status[/] to see network info")
+    console.print("[dim]The WireGuard tunnel is now active.[/]")
+    console.print("[dim]You can bring it down with: [bold]homie network down[/][/]")
+    console.print()
+    console.print("To start the daemon and accept jobs, run: [bold]homie up --mesh[/]")
 
 
 @network.command("status")

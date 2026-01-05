@@ -81,9 +81,18 @@ homie run → Client connects to peer's Worker → Worker spawns Docker containe
 ## Wire Protocol
 
 Binary message format: `type (1 byte) + length (4 bytes) + data`
+
+**Job Execution:**
 - `J`: Job submission
 - `O`: stdout chunk
 - `E`: stderr chunk
+- `R`: Result
+- `K`: Kill job
+- `L`: List jobs
+
+**Mesh Network (when --mesh enabled):**
+- `B`: Bundle request (fetch network bundle for new joiner)
+- `P`: Peer announce (notify peers of new member)
 
 ## File Locations
 

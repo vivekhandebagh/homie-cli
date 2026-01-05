@@ -389,6 +389,53 @@ class MeshManager:
         if peer_file.exists():
             peer_file.unlink()
 
+    def _save_pending_invite(self, auth_token: str, joiner_pubkey: str):
+        """Save a pending invite token to disk for bundle service."""
+        invites_file = NETWORK_DIR / "pending_invites.json"
+
+        # Load existing invites
+        invites = {}
+        if invites_file.exists():
+            with open(invites_file) as f:
+                invites = json.load(f)
+
+        # Add new invite
+        invites[auth_token] = {
+            "joiner_pubkey": joiner_pubkey,
+            "created_at": time.time(),
+            "expires_at": time.time() + 3600  # 1 hour
+        }
+
+        # Save back
+        self.ensure_dirs()
+        with open(invites_file, "w") as f:
+            json.dump(invites, f, indent=2)
+        os.chmod(invites_file, 0o600)
+
+    def load_pending_invites(self) -> dict[str, dict]:
+        """Load pending invites from disk."""
+        invites_file = NETWORK_DIR / "pending_invites.json"
+
+        if not invites_file.exists():
+            return {}
+
+        with open(invites_file) as f:
+            invites = json.load(f)
+
+        # Remove expired invites
+        now = time.time()
+        valid_invites = {
+            token: data for token, data in invites.items()
+            if now < data['expires_at']
+        }
+
+        # Save back cleaned list if any were expired
+        if len(valid_invites) != len(invites):
+            with open(invites_file, "w") as f:
+                json.dump(valid_invites, f, indent=2)
+
+        return valid_invites
+
     def get_next_mesh_ip(self) -> str:
         """Get the next available mesh IP."""
         if not self.network:
@@ -436,8 +483,11 @@ class MeshManager:
             assigned_ip=assigned_ip,
         )
 
-        # Store pending invite
+        # Store pending invite (in-memory, for this session)
         self._pending_invites[invite.auth_token] = invite
+
+        # Save pending invite to disk for bundle service
+        self._save_pending_invite(invite.auth_token, joiner_pubkey)
 
         # Pre-register the peer (will be confirmed when they connect)
         peer = Peer(
@@ -607,6 +657,9 @@ class MeshManager:
             assigned_ip=assigned_ip,
             relay_mesh_ip=relay_peer.mesh_ip  # Indicates this is a relay invite
         )
+
+        # Save pending invite to disk for bundle service
+        self._save_pending_invite(invite.auth_token, joiner_pubkey)
 
         # Pre-register the peer
         peer = Peer(
@@ -812,3 +865,197 @@ class MeshManager:
             return False
         except Exception:
             return False
+
+    # =========================================================================
+    # Bundle Transfer and Peer Synchronization
+    # =========================================================================
+
+    def fetch_bundle_from_peer(self, peer_mesh_ip: str, auth_token: str,
+                                joiner_pubkey: str, worker_port: int = 5556) -> Optional[NetworkBundle]:
+        """
+        Fetch network bundle from a peer over the mesh network.
+
+        Uses Worker protocol (TCP port 5556) with message type 'B'.
+
+        Args:
+            peer_mesh_ip: Mesh IP of the peer serving the bundle
+            auth_token: Auth token from invite code for verification
+            joiner_pubkey: Our public key for verification
+            worker_port: Worker port (default 5556)
+
+        Returns:
+            NetworkBundle if successful, None otherwise
+        """
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+
+        try:
+            # Connect to peer's worker
+            sock.connect((peer_mesh_ip, worker_port))
+
+            # Send message type 'B' (Bundle request)
+            sock.sendall(b'B')
+
+            # Prepare payload
+            payload = json.dumps({
+                "auth_token": auth_token,
+                "joiner_pubkey": joiner_pubkey
+            }).encode()
+
+            # Send length-prefixed payload
+            sock.sendall(len(payload).to_bytes(4, "big"))
+            sock.sendall(payload)
+
+            # Receive response (1 byte: '1' = success, '0' = failure)
+            status = sock.recv(1)
+            if status != b'1':
+                print(f"[Bundle] Fetch failed: auth rejected")
+                return None
+
+            # Receive bundle (length-prefixed JSON)
+            length_bytes = self._recv_exactly_sock(sock, 4)
+            if not length_bytes:
+                return None
+
+            length = int.from_bytes(length_bytes, "big")
+            bundle_data = self._recv_exactly_sock(sock, length)
+            if not bundle_data:
+                return None
+
+            bundle_dict = json.loads(bundle_data.decode())
+            return NetworkBundle.from_dict(bundle_dict)
+
+        except Exception as e:
+            print(f"[Bundle] Failed to fetch from {peer_mesh_ip}: {e}")
+            return None
+        finally:
+            sock.close()
+
+    def apply_bundle(self, bundle: NetworkBundle):
+        """
+        Apply a received bundle to local network state.
+
+        Updates network with real group_secret and saves all peers.
+
+        Args:
+            bundle: NetworkBundle received from inviter
+        """
+        if not self.network:
+            raise RuntimeError("No network configured")
+
+        # Update network with real data from bundle
+        self.network.group_secret = bundle.group_secret
+        self.network.next_ip = len(bundle.peers) + 2  # Next available after all peers
+        self.save_network(self.network)
+
+        # Save all peers from bundle
+        for peer in bundle.peers:
+            self.save_peer(peer)
+
+        print(f"[Bundle] Applied bundle: {len(bundle.peers)} peers, group_secret updated")
+
+    def announce_peer_to_mesh(self, peer: Peer, worker_port: int = 5556):
+        """
+        Announce a new peer to all existing mesh members.
+
+        Uses Worker protocol (TCP port 5556) with message type 'P'.
+        This ensures network-wide peer synchronization after a new member joins.
+
+        Args:
+            peer: The peer to announce (typically the newly joined peer)
+            worker_port: Worker port (default 5556)
+        """
+        import socket
+
+        self.load_peers()
+        success_count = 0
+        fail_count = 0
+
+        for existing_peer in self.peers.values():
+            # Don't announce to ourselves or to the peer being announced
+            if existing_peer.mesh_ip == self.network.my_mesh_ip:
+                continue
+            if existing_peer.mesh_ip == peer.mesh_ip:
+                continue
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+
+            try:
+                # Connect to peer's worker
+                sock.connect((existing_peer.mesh_ip, worker_port))
+
+                # Send message type 'P' (Peer announce)
+                sock.sendall(b'P')
+
+                # Prepare payload
+                payload = json.dumps(peer.to_dict()).encode()
+
+                # Send length-prefixed payload
+                sock.sendall(len(payload).to_bytes(4, "big"))
+                sock.sendall(payload)
+
+                # Receive response (1 byte: '1' = success, '0' = failure)
+                status = sock.recv(1)
+                if status == b'1':
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+            except Exception:
+                fail_count += 1  # Peer may be offline
+            finally:
+                sock.close()
+
+        print(f"[Bundle] Announced {peer.name} to mesh: {success_count} successful, {fail_count} failed")
+
+    def fetch_bundle_via_relay(self, relay_mesh_ip: str, auth_token: str,
+                                joiner_pubkey: str) -> Optional[NetworkBundle]:
+        """
+        Fetch network bundle through a relay peer.
+
+        Used when direct connection to inviter is not possible.
+        Still uses HTTP for relay coordination (port 8080).
+
+        Args:
+            relay_mesh_ip: Mesh IP of the relay peer
+            auth_token: Auth token from invite code
+            joiner_pubkey: Our public key for verification
+
+        Returns:
+            NetworkBundle if successful, None otherwise
+        """
+        import requests
+
+        try:
+            response = requests.post(
+                f"http://{relay_mesh_ip}:8080/bundle/proxy",
+                json={
+                    "auth_token": auth_token,
+                    "joiner_pubkey": joiner_pubkey
+                },
+                timeout=15  # Longer timeout for relay
+            )
+
+            if response.status_code == 200:
+                bundle_data = response.json()
+                return NetworkBundle.from_dict(bundle_data)
+            else:
+                print(f"[Bundle] Relay fetch failed: HTTP {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"[Bundle] Failed to fetch via relay {relay_mesh_ip}: {e}")
+            return None
+
+    def _recv_exactly_sock(self, sock, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes from socket."""
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
