@@ -219,11 +219,15 @@ def up(name: str, mesh: bool):
     # Check mesh peer connectivity and add to discovered peers
     if mesh_manager and mesh_manager.peers:
         import socket
+        console.print(f"[dim]Checking {len(mesh_manager.peers)} mesh peer(s) for connectivity...[/]")
+
         for peer in mesh_manager.peers.values():
             if peer.mesh_ip == mesh_manager.network.my_mesh_ip:
+                console.print(f"[dim]  Skipping self ({peer.mesh_ip})[/]")
                 continue
 
             # Try to connect to peer's worker to see if they're online
+            console.print(f"[dim]  Testing {peer.name} ({peer.mesh_ip})...[/]", end=" ")
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.settimeout(2)
@@ -236,16 +240,23 @@ def up(name: str, mesh: bool):
                     name=peer.name,
                     ip=peer.mesh_ip,
                     port=config.worker_port,
+                    cpu_percent_used=0.0,  # Unknown - will be updated by discovery
+                    ram_free_gb=0.0,  # Unknown
+                    ram_total_gb=0.0,  # Unknown
+                    gpu_name=None,
+                    gpu_memory_free_gb=None,
+                    status="idle",
+                    relay_available=False,
+                    public_endpoint=None,
                     last_seen=time.time(),
-                    cpu_percent=0,  # Unknown
-                    memory_percent=0,  # Unknown
-                    disk_percent=0,  # Unknown
                 )
                 discovery._peers[peer.mesh_ip] = mesh_peer
+                console.print(f"[green]online[/]")
 
-            except Exception:
-                # Peer offline, that's okay
-                pass
+            except Exception as e:
+                console.print(f"[yellow]offline ({e})[/]")
+
+        console.print()
 
     # Run live dashboard
     dashboard = LiveDashboard(config.name, discovery, worker, docker_ok, gpu_ok)
