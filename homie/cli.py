@@ -219,6 +219,11 @@ def up(name: str, mesh: bool):
     # Check mesh peer connectivity and add to discovered peers
     if mesh_manager and mesh_manager.peers:
         import socket
+
+        # Give the tunnel a moment to fully stabilize
+        console.print(f"[dim]Waiting for mesh network to stabilize...[/]")
+        time.sleep(3)
+
         console.print(f"[dim]Checking {len(mesh_manager.peers)} mesh peer(s) for connectivity...[/]")
 
         for peer in mesh_manager.peers.values():
@@ -230,7 +235,7 @@ def up(name: str, mesh: bool):
             console.print(f"[dim]  Testing {peer.name} ({peer.mesh_ip})...[/]", end=" ")
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_sock.settimeout(2)
+                test_sock.settimeout(5)  # Increased timeout for mesh connections
                 test_sock.connect((peer.mesh_ip, config.worker_port))
                 test_sock.close()
 
