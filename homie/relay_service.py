@@ -6,6 +6,7 @@ of new members when direct connection is not possible.
 """
 
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
