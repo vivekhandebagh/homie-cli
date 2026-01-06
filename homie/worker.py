@@ -414,11 +414,8 @@ class Worker:
             conn.sendall(len(bundle_data).to_bytes(4, "big"))
             conn.sendall(bundle_data)
 
-            print(f"[Worker] Sent bundle to joiner (pubkey: {joiner_pubkey[:12]}...)")
-
         except Exception as e:
             conn.sendall(b'0')  # Error
-            print(f"[Worker] Bundle request error: {e}")
 
     def _handle_peer_announce(self, conn: socket.socket) -> None:
         """Handle a peer announcement from a newly joined peer (mesh)."""
@@ -447,8 +444,6 @@ class Worker:
             self.mesh_manager.save_peer(peer)
 
             conn.sendall(b'1')  # Success
-            print(f"[Worker] Registered new peer: {peer.name} ({peer.mesh_ip})")
 
         except Exception as e:
             conn.sendall(b'0')  # Error
-            print(f"[Worker] Peer announce error: {e}")

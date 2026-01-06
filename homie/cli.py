@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -221,18 +222,14 @@ def up(name: str, mesh: bool):
         import socket
 
         # Give the tunnel a moment to fully stabilize
-        console.print(f"[dim]Waiting for mesh network to stabilize...[/]")
         time.sleep(3)
 
-        console.print(f"[dim]Checking {len(mesh_manager.peers)} mesh peer(s) for connectivity...[/]")
-
+        online_count = 0
         for peer in mesh_manager.peers.values():
             if peer.mesh_ip == mesh_manager.network.my_mesh_ip:
-                console.print(f"[dim]  Skipping self ({peer.mesh_ip})[/]")
                 continue
 
             # Try to connect to peer's worker to see if they're online
-            console.print(f"[dim]  Testing {peer.name} ({peer.mesh_ip})...[/]", end=" ")
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.settimeout(5)  # Increased timeout for mesh connections
@@ -256,12 +253,44 @@ def up(name: str, mesh: bool):
                     last_seen=time.time(),
                 )
                 discovery._peers[peer.mesh_ip] = mesh_peer
-                console.print(f"[green]online[/]")
+                online_count += 1
 
-            except Exception as e:
-                console.print(f"[yellow]offline ({e})[/]")
+            except Exception:
+                pass  # Peer offline
 
+        if online_count > 0:
+            console.print(f"[dim]Found {online_count} mesh peer(s) online[/]")
         console.print()
+
+    # Start background thread to keep mesh peers alive
+    if mesh_manager and mesh_manager.peers:
+        def keep_mesh_peers_alive():
+            """Background thread to periodically update last_seen for mesh peers."""
+            import socket as sock_module
+            while True:
+                time.sleep(10)  # Check every 10 seconds
+
+                for peer in mesh_manager.peers.values():
+                    if peer.mesh_ip == mesh_manager.network.my_mesh_ip:
+                        continue
+
+                    # Quick TCP health check
+                    try:
+                        test_sock = sock_module.socket(sock_module.AF_INET, sock_module.SOCK_STREAM)
+                        test_sock.settimeout(2)
+                        test_sock.connect((peer.mesh_ip, config.worker_port))
+                        test_sock.close()
+
+                        # Peer is alive - update last_seen
+                        with discovery._lock:
+                            if peer.mesh_ip in discovery._peers:
+                                discovery._peers[peer.mesh_ip].last_seen = time.time()
+                    except Exception:
+                        # Peer offline or slow, skip
+                        pass
+
+        mesh_keepalive_thread = threading.Thread(target=keep_mesh_peers_alive, daemon=True)
+        mesh_keepalive_thread.start()
 
     # Run live dashboard
     dashboard = LiveDashboard(config.name, discovery, worker, docker_ok, gpu_ok)
