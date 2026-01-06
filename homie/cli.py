@@ -262,13 +262,16 @@ def up(name: str, mesh: bool):
             console.print(f"[dim]Found {online_count} mesh peer(s) online[/]")
         console.print()
 
-    # Start background thread to keep mesh peers alive
+    # Start background thread to keep mesh peers alive and detect new joiners
     if mesh_manager and mesh_manager.peers:
         def keep_mesh_peers_alive():
             """Background thread to periodically update last_seen for mesh peers."""
             import socket as sock_module
             while True:
                 time.sleep(10)  # Check every 10 seconds
+
+                # Reload peers from disk (in case new ones joined)
+                mesh_manager.load_peers()
 
                 for peer in mesh_manager.peers.values():
                     if peer.mesh_ip == mesh_manager.network.my_mesh_ip:
@@ -281,10 +284,32 @@ def up(name: str, mesh: bool):
                         test_sock.connect((peer.mesh_ip, config.worker_port))
                         test_sock.close()
 
-                        # Peer is alive - update last_seen
+                        # Peer is alive - update or add to discovery
                         with discovery._lock:
                             if peer.mesh_ip in discovery._peers:
+                                # Update existing peer
                                 discovery._peers[peer.mesh_ip].last_seen = time.time()
+                            else:
+                                # New peer joined - add to discovery
+                                from .discovery import Peer as DiscPeer
+                                mesh_peer = DiscPeer(
+                                    name=peer.name,
+                                    ip=peer.mesh_ip,
+                                    port=config.worker_port,
+                                    cpu_percent_used=0.0,
+                                    ram_free_gb=0.0,
+                                    ram_total_gb=0.0,
+                                    gpu_name=None,
+                                    gpu_memory_free_gb=None,
+                                    status="idle",
+                                    relay_available=False,
+                                    public_endpoint=None,
+                                    last_seen=time.time(),
+                                )
+                                discovery._peers[peer.mesh_ip] = mesh_peer
+                                # Trigger peer joined callback
+                                if on_peer_joined:
+                                    on_peer_joined(mesh_peer)
                     except Exception:
                         # Peer offline or slow, skip
                         pass
