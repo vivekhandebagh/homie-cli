@@ -216,6 +216,37 @@ def up(name: str, mesh: bool):
     discovery.start()
     worker.start()
 
+    # Check mesh peer connectivity and add to discovered peers
+    if mesh_manager and mesh_manager.peers:
+        import socket
+        for peer in mesh_manager.peers.values():
+            if peer.mesh_ip == mesh_manager.network.my_mesh_ip:
+                continue
+
+            # Try to connect to peer's worker to see if they're online
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.settimeout(2)
+                test_sock.connect((peer.mesh_ip, config.worker_port))
+                test_sock.close()
+
+                # Peer is online - manually add to discovery's active peers
+                from .discovery import Peer as DiscPeer
+                mesh_peer = DiscPeer(
+                    name=peer.name,
+                    ip=peer.mesh_ip,
+                    port=config.worker_port,
+                    last_seen=time.time(),
+                    cpu_percent=0,  # Unknown
+                    memory_percent=0,  # Unknown
+                    disk_percent=0,  # Unknown
+                )
+                discovery._peers[peer.mesh_ip] = mesh_peer
+
+            except Exception:
+                # Peer offline, that's okay
+                pass
+
     # Run live dashboard
     dashboard = LiveDashboard(config.name, discovery, worker, docker_ok, gpu_ok)
 
@@ -1190,6 +1221,43 @@ def network_join(invite_code: str):
 
     console.print(f"[green]✓ Tunnel active:[/] {invite.assigned_ip}")
     console.print()
+
+    # Wait a moment for tunnel to stabilize
+    console.print("[dim]Waiting for tunnel to stabilize...[/]")
+    time.sleep(2)
+
+    # Test connectivity to inviter
+    inviter_mesh_ip = inviter_info.get('inviter_mesh_ip', '10.100.0.1') if invite.relay_mesh_ip else '10.100.0.1'
+    console.print(f"[dim]Testing connectivity to {inviter_mesh_ip}...[/]")
+
+    import subprocess
+    import platform as plt
+    ping_cmd = ["ping", "-n" if plt.system() == "Windows" else "-c", "2", inviter_mesh_ip]
+    ping_result = subprocess.run(ping_cmd, capture_output=True, timeout=10)
+
+    if ping_result.returncode != 0:
+        console.print(f"[yellow]Warning: Cannot ping inviter at {inviter_mesh_ip}[/]")
+        console.print("[yellow]This may indicate tunnel or routing issues[/]")
+        console.print("[yellow]Make sure inviter has 'homie up --mesh' running[/]")
+        console.print()
+    else:
+        console.print(f"[green]✓ Inviter reachable[/]")
+
+        # Test if Worker port is accessible (default 5556)
+        import socket as test_sock
+        test_socket = test_sock.socket(test_sock.AF_INET, test_sock.SOCK_STREAM)
+        test_socket.settimeout(3)
+        worker_port = 5556  # Default worker port
+        try:
+            test_socket.connect((inviter_mesh_ip, worker_port))
+            test_socket.close()
+            console.print(f"[green]✓ Worker port {worker_port} accessible[/]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Cannot connect to Worker port {worker_port}[/]")
+            console.print(f"[yellow]Make sure inviter has 'homie up --mesh' running[/]")
+            console.print(f"[dim]Error: {e}[/]")
+        console.print()
+
     console.print("[bold]Fetching network bundle...[/]")
 
     # Fetch bundle from inviter (direct or via relay)

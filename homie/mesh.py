@@ -939,11 +939,13 @@ class MeshManager:
         import socket
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
+        sock.settimeout(20)  # Increased timeout for slower connections
 
         try:
             # Connect to peer's worker
+            print(f"[Bundle] Connecting to {peer_mesh_ip}:{worker_port}...")
             sock.connect((peer_mesh_ip, worker_port))
+            print(f"[Bundle] Connected, sending request...")
 
             # Send message type 'B' (Bundle request)
             sock.sendall(b'B')
@@ -958,27 +960,41 @@ class MeshManager:
             sock.sendall(len(payload).to_bytes(4, "big"))
             sock.sendall(payload)
 
+            print(f"[Bundle] Waiting for response...")
             # Receive response (1 byte: '1' = success, '0' = failure)
             status = sock.recv(1)
             if status != b'1':
-                print(f"[Bundle] Fetch failed: auth rejected")
+                print(f"[Bundle] Fetch failed: auth rejected (status: {status})")
                 return None
 
+            print(f"[Bundle] Auth accepted, receiving bundle...")
             # Receive bundle (length-prefixed JSON)
             length_bytes = self._recv_exactly_sock(sock, 4)
             if not length_bytes:
+                print(f"[Bundle] Failed to receive bundle length")
                 return None
 
             length = int.from_bytes(length_bytes, "big")
+            print(f"[Bundle] Bundle size: {length} bytes")
             bundle_data = self._recv_exactly_sock(sock, length)
             if not bundle_data:
+                print(f"[Bundle] Failed to receive bundle data")
                 return None
 
             bundle_dict = json.loads(bundle_data.decode())
+            print(f"[Bundle] Successfully fetched bundle")
             return NetworkBundle.from_dict(bundle_dict)
 
+        except socket.timeout:
+            print(f"[Bundle] Connection to {peer_mesh_ip}:{worker_port} timed out")
+            print(f"[Bundle] Make sure inviter has 'homie up --mesh' running")
+            return None
+        except ConnectionRefusedError:
+            print(f"[Bundle] Connection refused by {peer_mesh_ip}:{worker_port}")
+            print(f"[Bundle] Make sure inviter has 'homie up --mesh' running")
+            return None
         except Exception as e:
-            print(f"[Bundle] Failed to fetch from {peer_mesh_ip}: {e}")
+            print(f"[Bundle] Failed to fetch from {peer_mesh_ip}: {type(e).__name__}: {e}")
             return None
         finally:
             sock.close()
