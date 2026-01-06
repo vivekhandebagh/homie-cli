@@ -12,6 +12,7 @@ Key features:
 import base64
 import json
 import os
+import platform
 import secrets
 import subprocess
 import time
@@ -769,15 +770,16 @@ class MeshManager:
         return config_path
 
     def tunnel_up(self) -> bool:
-        """Bring up the WireGuard tunnel using wg-quick.
+        """Bring up the WireGuard tunnel.
 
-        Requires sudo. The user will be prompted for their password inline.
+        On Linux/macOS: Uses wg-quick (requires sudo).
+        On Windows: Uses wireguard.exe /installtunnelservice (requires admin).
 
         Returns:
             True if successful, False otherwise.
 
         Raises:
-            RuntimeError: If wg-quick is not installed.
+            RuntimeError: If WireGuard tools are not installed.
         """
         # Generate/update config first
         config_path = self.generate_wireguard_config()
@@ -787,31 +789,57 @@ class MeshManager:
             # Bring down first to apply any config changes
             self.tunnel_down()
 
-        try:
-            # Let sudo prompt interactively for password
-            result = subprocess.run(
-                ["sudo", "wg-quick", "up", str(config_path)],
-                timeout=60,
-            )
-            if result.returncode == 0:
-                return True
+        system = platform.system()
 
-            # If it failed because interface exists, try bringing down first
-            # This handles edge cases where is_tunnel_up() returned False but interface exists
-            self.tunnel_down()
-            result = subprocess.run(
-                ["sudo", "wg-quick", "up", str(config_path)],
-                timeout=60,
-            )
-            return result.returncode == 0
+        try:
+            if system == "Windows":
+                # Windows: Use wireguard.exe to install tunnel service
+                # First try standard location
+                wg_exe = r"C:\Program Files\WireGuard\wireguard.exe"
+                if not os.path.exists(wg_exe):
+                    raise RuntimeError(
+                        "WireGuard not found. Install from:\n"
+                        "  https://www.wireguard.com/install/"
+                    )
+
+                result = subprocess.run(
+                    [wg_exe, "/installtunnelservice", str(config_path)],
+                    capture_output=True,
+                    timeout=60,
+                )
+                return result.returncode == 0
+
+            else:
+                # Linux/macOS: Use wg-quick
+                result = subprocess.run(
+                    ["sudo", "wg-quick", "up", str(config_path)],
+                    timeout=60,
+                )
+                if result.returncode == 0:
+                    return True
+
+                # If it failed because interface exists, try bringing down first
+                self.tunnel_down()
+                result = subprocess.run(
+                    ["sudo", "wg-quick", "up", str(config_path)],
+                    timeout=60,
+                )
+                return result.returncode == 0
+
         except subprocess.TimeoutExpired:
             return False
         except FileNotFoundError:
-            raise RuntimeError(
-                "wg-quick not found. Install WireGuard tools:\n"
-                "  macOS:  brew install wireguard-tools\n"
-                "  Linux:  sudo apt install wireguard-tools"
-            )
+            if system == "Windows":
+                raise RuntimeError(
+                    "WireGuard not found. Install from:\n"
+                    "  https://www.wireguard.com/install/"
+                )
+            else:
+                raise RuntimeError(
+                    "wg-quick not found. Install WireGuard tools:\n"
+                    "  macOS:  brew install wireguard-tools\n"
+                    "  Linux:  sudo apt install wireguard-tools"
+                )
 
     def tunnel_down(self) -> bool:
         """Bring down the WireGuard tunnel.
@@ -824,46 +852,67 @@ class MeshManager:
         if not config_path.exists():
             return True  # Nothing to bring down
 
+        system = platform.system()
+
         try:
-            # Always try to bring down - don't check is_tunnel_up() first
-            # as the check can be unreliable on macOS
-            result = subprocess.run(
-                ["sudo", "wg-quick", "down", str(config_path)],
-                timeout=30,
-            )
-            # Return True if successful OR if it was already down (exit code varies)
-            return True
+            if system == "Windows":
+                # Windows: Use wireguard.exe to uninstall tunnel service
+                wg_exe = r"C:\Program Files\WireGuard\wireguard.exe"
+                if not os.path.exists(wg_exe):
+                    return True  # Can't bring down if WireGuard not installed
+
+                result = subprocess.run(
+                    [wg_exe, "/uninstalltunnelservice", INTERFACE_NAME],
+                    capture_output=True,
+                    timeout=30,
+                )
+                return True  # Return True even if it was already down
+            else:
+                # Linux/macOS: Use wg-quick
+                result = subprocess.run(
+                    ["sudo", "wg-quick", "down", str(config_path)],
+                    timeout=30,
+                )
+                return True
         except subprocess.TimeoutExpired:
             return False
         except Exception:
-            # If wg-quick down fails, tunnel is likely already down
+            # If command fails, tunnel is likely already down
             return True
 
     def is_tunnel_up(self) -> bool:
         """Check if the WireGuard tunnel interface exists and is up."""
         try:
-            # Use 'wg show' without sudo first - it can show interface names without root
-            # On macOS, the interface shows up as utunX but wg-quick tracks it
-            result = subprocess.run(
-                ["wg", "show", "interfaces"],
-                capture_output=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                interfaces = result.stdout.decode().strip().split()
-                # Check if our interface name is in the list
-                if INTERFACE_NAME in interfaces:
-                    return True
+            system = platform.system()
 
-            # Fallback: check if the config is tracked by wg-quick on macOS
-            # wg-quick on macOS stores state in /var/run/wireguard/
-            import platform
-            if platform.system() == "Darwin":
-                state_file = Path(f"/var/run/wireguard/{INTERFACE_NAME}.name")
-                if state_file.exists():
-                    return True
+            if system == "Windows":
+                # Windows: Check if service is running using wg.exe
+                result = subprocess.run(
+                    ["wg", "show", INTERFACE_NAME],
+                    capture_output=True,
+                    timeout=5,
+                )
+                return result.returncode == 0
+            else:
+                # Linux/macOS: Use 'wg show' to list interfaces
+                result = subprocess.run(
+                    ["wg", "show", "interfaces"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    interfaces = result.stdout.decode().strip().split()
+                    # Check if our interface name is in the list
+                    if INTERFACE_NAME in interfaces:
+                        return True
 
-            return False
+                # Fallback: check if the config is tracked by wg-quick on macOS
+                if system == "Darwin":
+                    state_file = Path(f"/var/run/wireguard/{INTERFACE_NAME}.name")
+                    if state_file.exists():
+                        return True
+
+                return False
         except Exception:
             return False
 

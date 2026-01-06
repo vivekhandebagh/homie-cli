@@ -144,7 +144,12 @@ def up(name: str, mesh: bool):
         console.print("[bold cyan]Starting WireGuard mesh tunnel...[/]")
         if mesh_manager.peers:
             console.print(f"[dim]Network: {mesh_manager.network.name} | Peers: {len(mesh_manager.peers)}[/]")
-        console.print("[dim]You may be prompted for your password (sudo required)[/]")
+        
+        import platform
+        if platform.system() == "Windows":
+            console.print("[dim]Note: PowerShell must be run as Administrator[/]")
+        else:
+            console.print("[dim]You may be prompted for your password (sudo required)[/]")
         console.print()
 
         try:
@@ -1159,7 +1164,12 @@ def network_join(invite_code: str):
     console.print("[green]✓ Network configured[/]")
     console.print()
     console.print("[bold]Bringing up WireGuard tunnel...[/]")
-    console.print("[dim]You may be prompted for your password (sudo required)[/]")
+    
+    import platform
+    if platform.system() == "Windows":
+        console.print("[dim]Note: PowerShell must be run as Administrator[/]")
+    else:
+        console.print("[dim]You may be prompted for your password (sudo required)[/]")
     console.print()
 
     # Bring up WireGuard tunnel
@@ -1352,7 +1362,12 @@ def network_tunnel_up():
         console.print()
 
     console.print("[bold]Bringing up WireGuard mesh tunnel...[/]")
-    console.print("[dim]You may be prompted for your password[/]")
+    
+    import platform
+    if platform.system() == "Windows":
+        console.print("[dim]Note: PowerShell must be run as Administrator[/]")
+    else:
+        console.print("[dim]You may be prompted for your password[/]")
 
     try:
         if mesh.tunnel_up():
