@@ -210,8 +210,20 @@ class MeshRelayService:
         # Get mesh IP to bind to
         mesh_ip = self.mesh_manager.network.my_mesh_ip
 
-        # Create HTTP server
-        self._server = HTTPServer((mesh_ip, self.RELAY_PORT), RelayRequestHandler)
+        try:
+            # Create HTTP server
+            # Try binding to mesh IP first
+            self._server = HTTPServer((mesh_ip, self.RELAY_PORT), RelayRequestHandler)
+        except OSError as e:
+            # If binding to mesh IP fails (common on Windows), try 0.0.0.0
+            # This makes it accessible via the mesh IP but binds to all interfaces
+            try:
+                self._server = HTTPServer(("0.0.0.0", self.RELAY_PORT), RelayRequestHandler)
+                mesh_ip = "0.0.0.0"  # Update for logging
+            except OSError:
+                # If that also fails, relay service can't start
+                raise RuntimeError(f"Cannot bind relay service: {e}")
+        
         self._server.relay_service = self  # Pass reference to handlers
 
         # Start server thread

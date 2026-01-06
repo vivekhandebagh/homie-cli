@@ -126,6 +126,7 @@ def up(name: str, mesh: bool):
     # Handle mesh tunnel if requested
     mesh_manager = None
     relay_service = None
+    
     if mesh:
         mesh_manager = MeshManager()
 
@@ -167,9 +168,14 @@ def up(name: str, mesh: bool):
         # Start relay service if we have good connectivity
         from .relay_service import MeshRelayService
         relay_service = MeshRelayService(mesh_manager)
-        if relay_service.can_relay():
-            relay_service.start()
-            console.print("[dim]Relay service enabled (helping others join)[/]")
+        try:
+            if relay_service.can_relay():
+                relay_service.start()
+                console.print("[dim]Relay service enabled (helping others join)[/]")
+        except Exception as e:
+            # Relay service is optional - continue if it fails
+            console.print(f"[dim]Relay service unavailable ({e})[/]")
+            relay_service = None
         console.print()
 
     ip = get_local_ip()
