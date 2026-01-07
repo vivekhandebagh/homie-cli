@@ -133,6 +133,9 @@ class Worker:
             elif msg_type == b'P':
                 # Peer announce (mesh)
                 self._handle_peer_announce(conn)
+            elif msg_type == b'S':
+                # Stats request (mesh)
+                self._handle_stats_request(conn)
             else:
                 self._send_error(conn, f"Unknown message type: {msg_type}")
 
@@ -447,3 +450,33 @@ class Worker:
 
         except Exception as e:
             conn.sendall(b'0')  # Error
+
+    def _handle_stats_request(self, conn: socket.socket) -> None:
+        """Handle a stats request from a mesh peer."""
+        try:
+            from .utils import get_system_stats
+
+            stats = get_system_stats()
+
+            stats_dict = {
+                "cpu_percent": stats.cpu_percent_used,
+                "ram_free_gb": stats.ram_free_gb,
+                "ram_total_gb": stats.ram_total_gb,
+                "gpu_name": stats.gpu_name,
+                "gpu_memory_free_gb": stats.gpu_memory_free_gb,
+                "status": self._get_status(),
+            }
+
+            # Send success + stats
+            conn.sendall(b'1')
+            stats_data = json.dumps(stats_dict).encode()
+            conn.sendall(len(stats_data).to_bytes(4, "big"))
+            conn.sendall(stats_data)
+
+        except Exception:
+            conn.sendall(b'0')  # Error
+
+    def _get_status(self) -> str:
+        """Get current worker status."""
+        with self._lock:
+            return "busy" if self._running_jobs else "idle"
